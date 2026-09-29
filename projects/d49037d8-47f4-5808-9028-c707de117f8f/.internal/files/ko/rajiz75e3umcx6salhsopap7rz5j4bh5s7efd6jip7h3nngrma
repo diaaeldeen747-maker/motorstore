@@ -1,0 +1,199 @@
+'use strict';
+
+const { db } = require('../db');
+const crypto = require('node:crypto');
+const config = require('../config');
+const { ok, created, badRequest, notFound, requireFields, toNumber, toInt } = require('../helpers');
+const { parseMultipart, validateImage, saveImage } = require('../upload');
+const { getProduct } = require('./public');
+
+const SHIPPING_FEE = 60; // EGP flat shipping
+
+function generateAccessToken() {
+  return crypto.randomBytes(24).toString('hex');
+}
+
+function generateOrderNumber() {
+  const now = new Date();
+  const y = now.getFullYear();
+  const m = String(now.getMonth() + 1).padStart(2, '0');
+  const d = String(now.getDate()).padStart(2, '0');
+  const rand = Math.floor(1000 + Math.random() * 9000);
+  return `ORD-${y}${m}${d}-${rand}`;
+}
+
+// POST /api/orders  (JSON body)
+function createOrder(req, res, body) {
+  const missing = requireFields(body, [
+    'customer_name',
+    'phone',
+    'governorate',
+    'city',
+    'address',
+    'payment_method',
+    'items',
+  ]);
+  if (missing) return badRequest(res, `الحقل مطلوب: ${missing}`);
+
+  if (!Array.isArray(body.items) || body.items.length === 0) {
+    return badRequest(res, 'السلة فارغة');
+  }
+
+  const method = String(body.payment_method);
+  if (!['instapay', 'wallet'].includes(method)) {
+    return badRequest(res, 'طريقة دفع غير صالحة');
+  }
+
+  // Validate & price items server-side (never trust client prices)
+  let subtotal = 0;
+  const items = [];
+  for (const it of body.items) {
+    const productId = toInt(it.product_id);
+    const qty = toInt(it.quantity, 1);
+    if (!productId || qty < 1) return badRequest(res, 'بيانات منتج غير صالحة');
+    const product = getProduct(productId);
+    if (!product) return badRequest(res, `منتج غير موجود (${productId})`);
+    if (product.stock < qty) {
+      return badRequest(res, `الكمية المطلوبة غير متوفرة للمنتج: ${product.name}`);
+    }
+    const price = product.price;
+    subtotal += price * qty;
+    items.push({
+      product_id: product.id,
+      name: product.name,
+      sku: product.sku,
+      price,
+      quantity: qty,
+      image: product.images && product.images.length ? product.images[0] : null,
+    });
+  }
+
+  const discount = Math.max(0, toNumber(body.discount, 0));
+  const shipping = SHIPPING_FEE;
+  const total = Math.max(0, subtotal - discount) + shipping;
+
+  const orderNumber = generateOrderNumber();
+  const accessToken = generateAccessToken();
+
+  const tx = db; // node:sqlite uses synchronous API; wrap in transaction manually
+  db.exec('BEGIN');
+  try {
+    const info = db
+      .prepare(`
+        INSERT INTO orders
+          (order_number, access_token, customer_name, phone, whatsapp, governorate, city, address, notes,
+           subtotal, discount, shipping, total, payment_method, payment_status, order_status, transaction_id)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', 'new', ?)
+      `)
+      .run(
+        orderNumber,
+        accessToken,
+        String(body.customer_name).trim(),
+        String(body.phone).trim(),
+        body.whatsapp ? String(body.whatsapp).trim() : null,
+        String(body.governorate).trim(),
+        String(body.city).trim(),
+        String(body.address).trim(),
+        body.notes ? String(body.notes).trim() : null,
+        subtotal,
+        discount,
+        shipping,
+        total,
+        method,
+        body.transaction_id ? String(body.transaction_id).trim() : null
+      );
+    const orderId = Number(info.lastInsertRowid);
+
+    const insItem = db
+      .prepare(`
+        INSERT INTO order_items (order_id, product_id, name, sku, price, quantity, image)
+        VALUES (?, ?, ?, ?, ?, ?, ?)
+      `);
+    for (const it of items) {
+      insItem.run(orderId, it.product_id, it.name, it.sku, it.price, it.quantity, it.image);
+      // decrement stock & increment sold count
+      db.prepare('UPDATE products SET stock = stock - ?, sold_count = sold_count + ? WHERE id = ?')
+        .run(it.quantity, it.quantity, it.product_id);
+    }
+
+    // payment record
+    db
+      .prepare(`
+        INSERT INTO payments (order_id, method, amount, status, transaction_id)
+        VALUES (?, ?, ?, 'pending', ?)
+      `)
+      .run(orderId, method, total, body.transaction_id ? String(body.transaction_id).trim() : null);
+
+    db.exec('COMMIT');
+
+    const order = getOrder(orderId);
+    return created(res, { order });
+  } catch (e) {
+    db.exec('ROLLBACK');
+    throw e;
+  }
+}
+
+function getOrderByAccessToken(token) {
+  const order = db.prepare('SELECT * FROM orders WHERE access_token = ?').get(token);
+  if (!order) return null;
+  return getOrder(order.id);
+}
+
+function getOrder(orderId) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return null;
+  const items = db
+    .prepare('SELECT * FROM order_items WHERE order_id = ?')
+    .all(orderId);
+  const screenshots = db
+    .prepare('SELECT id, filename, path, created_at FROM payment_screenshots WHERE order_id = ?')
+    .all(orderId);
+  return {
+    ...order,
+    items,
+    screenshots,
+  };
+}
+
+// POST /api/orders/:id/payment-proof  (multipart: screenshot file + optional transaction_id)
+function uploadPaymentProof(req, res, params, rawBody, contentType) {
+  const orderId = toInt(params.id);
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(orderId);
+  if (!order) return notFound(res, 'الطلب غير موجود');
+
+  const boundary = extractBoundary(contentType);
+  if (!boundary) return badRequest(res, 'يجب رفع صورة إثبات الدفع');
+
+  const { fields, files } = parseMultipart(rawBody, boundary);
+  const file = files.find((f) => f.fieldname === 'screenshot') || files[0];
+  if (!file) return badRequest(res, 'لم يتم رفع صورة إثبات الدفع');
+
+  const validation = validateImage(file);
+  if (!validation.ok) return badRequest(res, validation.error);
+
+  const saved = saveImage(file, 'proof');
+  const transactionId = fields.transaction_id ? String(fields.transaction_id).trim() : null;
+
+  db.prepare(`
+    INSERT INTO payment_screenshots (order_id, payment_id, filename, path)
+    VALUES (?, (SELECT id FROM payments WHERE order_id = ? ORDER BY id DESC LIMIT 1), ?, ?)
+  `).run(orderId, orderId, saved.filename, saved.path);
+
+  // Update transaction id if provided and payment status -> under_review
+  db.prepare(`
+    UPDATE orders SET transaction_id = COALESCE(?, transaction_id), payment_status = 'under_review'
+    WHERE id = ?
+  `).run(transactionId, orderId);
+  db.prepare(`UPDATE payments SET status = 'under_review' WHERE order_id = ?`).run(orderId);
+
+  return ok(res, { order: getOrder(orderId) });
+}
+
+function extractBoundary(contentType) {
+  if (!contentType) return null;
+  const m = contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i);
+  return m ? (m[1] || m[2]).trim() : null;
+}
+
+module.exports = { createOrder, getOrder, uploadPaymentProof, SHIPPING_FEE };

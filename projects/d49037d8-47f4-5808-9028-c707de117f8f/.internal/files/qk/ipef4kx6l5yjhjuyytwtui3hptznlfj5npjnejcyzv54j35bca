@@ -1,0 +1,383 @@
+'use strict';
+
+const { db, slugify } = require('../db');
+const config = require('../config');
+const {
+  ok, created, badRequest, unauthorized, notFound,
+  requireFields, toNumber, toInt,
+} = require('../helpers');
+const {
+  verifyPassword, signToken, setAuthCookie, clearAuthCookie,
+} = require('../auth');
+const { parseMultipart, validateImage, saveImage } = require('../upload');
+const { productToJson, safeParse } = require('./public');
+
+// ---- Auth ----
+function login(req, res, body) {
+  const missing = requireFields(body, ['username', 'password']);
+  if (missing) return badRequest(res, 'اسم المستخدم وكلمة المرور مطلوبان');
+
+  const user = db
+    .prepare('SELECT * FROM users WHERE username = ?')
+    .get(String(body.username).trim());
+  if (!user || !verifyPassword(body.password, user.password_hash)) {
+    return unauthorized(res, 'بيانات الدخول غير صحيحة');
+  }
+
+  const token = signToken({ sub: user.id, role: user.role, username: user.username });
+  setAuthCookie(res, token);
+  return ok(res, { user: { id: user.id, username: user.username, role: user.role } });
+}
+
+function logout(req, res) {
+  clearAuthCookie(res);
+  return ok(res, { message: 'تم تسجيل الخروج' });
+}
+
+function me(req, res, user) {
+  return ok(res, { user: { id: user.id, username: user.username, role: user.role } });
+}
+
+// ---- Dashboard stats ----
+function dashboardStats() {
+  const orders = db.prepare('SELECT COUNT(*) AS c FROM orders').get().c;
+  const newOrders = db
+    .prepare("SELECT COUNT(*) AS c FROM orders WHERE order_status = 'new'").get().c;
+  const paidOrders = db
+    .prepare("SELECT COUNT(*) AS c FROM orders WHERE payment_status = 'paid'").get().c;
+  const totalSales = db
+    .prepare("SELECT COALESCE(SUM(total),0) AS s FROM orders WHERE payment_status = 'paid'").get().s;
+  const products = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
+  const lowStock = db
+    .prepare('SELECT COUNT(*) AS c FROM products WHERE stock <= 5').get().c;
+  const recentOrders = db
+    .prepare('SELECT * FROM orders ORDER BY id DESC LIMIT 5').all();
+
+  return {
+    orders,
+    newOrders,
+    paidOrders,
+    totalSales,
+    products,
+    lowStock,
+    recentOrders,
+  };
+}
+
+// ---- Products ----
+function listProductsAdmin(params) {
+  const page = Math.max(1, toInt(params.page, 1));
+  const pageSize = Math.min(100, Math.max(1, toInt(params.pageSize, 50)));
+  const offset = (page - 1) * pageSize;
+  const total = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
+  const rows = db
+    .prepare(`
+      SELECT p.*, c.name AS category_name, m.name AS manufacturer_name, mm.name AS model_name
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN manufacturers m ON m.id = p.manufacturer_id
+      LEFT JOIN motorcycle_models mm ON mm.id = p.model_id
+      ORDER BY p.id DESC LIMIT ? OFFSET ?`)
+    .all(pageSize, offset);
+  return {
+    products: rows.map(productToJson),
+    total, page, pageSize, totalPages: Math.ceil(total / pageSize),
+  };
+}
+
+function createProduct(req, res, body) {
+  const missing = requireFields(body, ['name', 'price']);
+  if (missing) return badRequest(res, `الحقل مطلوب: ${missing}`);
+
+  const name = String(body.name).trim();
+  const price = toNumber(body.price);
+  if (price === null || price < 0) return badRequest(res, 'السعر غير صالح');
+
+  const oldPrice = toNumber(body.old_price, null);
+  const discount = oldPrice && oldPrice > price
+    ? Math.round(((oldPrice - price) / oldPrice) * 100)
+    : toInt(body.discount, 0);
+
+  const slug = body.slug ? slugify(body.slug) : slugify(name);
+  const exists = db.prepare('SELECT id FROM products WHERE slug = ?').get(slug);
+  if (exists) return badRequest(res, 'الاسم/الرابط مستخدم بالفعل');
+
+  const images = normalizeImages(body.images);
+
+  const info = db
+    .prepare(`
+      INSERT INTO products
+        (sku, name, slug, description, price, old_price, discount, stock,
+         category_id, manufacturer_id, model_id, year, compatibility, status, images)
+      VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `)
+    .run(
+      body.sku ? String(body.sku).trim() : null,
+      name,
+      slug,
+      body.description ? String(body.description) : null,
+      price,
+      oldPrice,
+      discount,
+      toInt(body.stock, 0),
+      toInt(body.category_id, null),
+      toInt(body.manufacturer_id, null),
+      toInt(body.model_id, null),
+      body.year ? String(body.year) : null,
+      body.compatibility ? String(body.compatibility) : null,
+      body.status === 'inactive' ? 'inactive' : 'active',
+      JSON.stringify(images)
+    );
+
+  return created(res, { product: getProductAdmin(Number(info.lastInsertRowid)) });
+}
+
+function updateProduct(req, res, id, body) {
+  const product = db.prepare('SELECT * FROM products WHERE id = ?').get(id);
+  if (!product) return notFound(res, 'المنتج غير موجود');
+
+  const name = body.name !== undefined ? String(body.name).trim() : product.name;
+  const price = body.price !== undefined ? toNumber(body.price) : product.price;
+  if (price === null || price < 0) return badRequest(res, 'السعر غير صالح');
+
+  const oldPrice = body.old_price !== undefined ? toNumber(body.old_price, null) : product.old_price;
+  const discount = oldPrice && oldPrice > price
+    ? Math.round(((oldPrice - price) / oldPrice) * 100)
+    : (body.discount !== undefined ? toInt(body.discount, 0) : product.discount);
+
+  const images = body.images !== undefined ? normalizeImages(body.images) : safeParse(product.images);
+
+  db.prepare(`
+    UPDATE products SET
+      name = ?, price = ?, old_price = ?, discount = ?, stock = ?,
+      description = ?, category_id = ?, manufacturer_id = ?, model_id = ?,
+      year = ?, compatibility = ?, status = ?, images = ?, sku = ?, updated_at = datetime('now')
+    WHERE id = ?
+  `).run(
+    name,
+    price,
+    oldPrice,
+    discount,
+    body.stock !== undefined ? toInt(body.stock, 0) : product.stock,
+    body.description !== undefined ? String(body.description) : product.description,
+    body.category_id !== undefined ? toInt(body.category_id, null) : product.category_id,
+    body.manufacturer_id !== undefined ? toInt(body.manufacturer_id, null) : product.manufacturer_id,
+    body.model_id !== undefined ? toInt(body.model_id, null) : product.model_id,
+    body.year !== undefined ? String(body.year) : product.year,
+    body.compatibility !== undefined ? String(body.compatibility) : product.compatibility,
+    body.status !== undefined ? (body.status === 'inactive' ? 'inactive' : 'active') : product.status,
+    JSON.stringify(images),
+    body.sku !== undefined ? (body.sku ? String(body.sku).trim() : null) : product.sku,
+    id
+  );
+
+  return ok(res, { product: getProductAdmin(id) });
+}
+
+function deleteProduct(req, res, id) {
+  const info = db.prepare('DELETE FROM products WHERE id = ?').run(id);
+  if (info.changes === 0) return notFound(res, 'المنتج غير موجود');
+  return ok(res, { message: 'تم حذف المنتج' });
+}
+
+function getProductAdmin(id) {
+  const row = db
+    .prepare(`
+      SELECT p.*, c.name AS category_name, m.name AS manufacturer_name, mm.name AS model_name
+      FROM products p
+      LEFT JOIN categories c ON c.id = p.category_id
+      LEFT JOIN manufacturers m ON m.id = p.manufacturer_id
+      LEFT JOIN motorcycle_models mm ON mm.id = p.model_id
+      WHERE p.id = ?`)
+    .get(id);
+  return row ? productToJson(row) : null;
+}
+
+function normalizeImages(images) {
+  if (Array.isArray(images)) {
+    return images.filter((i) => typeof i === 'string' && i.length > 0);
+  }
+  if (typeof images === 'string') {
+    try {
+      const v = JSON.parse(images);
+      if (Array.isArray(v)) return v.filter((i) => typeof i === 'string');
+    } catch {
+      return [];
+    }
+  }
+  return [];
+}
+
+// ---- Categories ----
+function createCategory(req, res, body) {
+  const missing = requireFields(body, ['name']);
+  if (missing) return badRequest(res, 'الاسم مطلوب');
+  const name = String(body.name).trim();
+  const slug = body.slug ? slugify(body.slug) : slugify(name);
+  if (db.prepare('SELECT id FROM categories WHERE slug = ?').get(slug)) {
+    return badRequest(res, 'الاسم/الرابط مستخدم بالفعل');
+  }
+  const info = db
+    .prepare('INSERT INTO categories (name, slug, parent_id, image, sort_order) VALUES (?, ?, ?, ?, ?)')
+    .run(name, slug, toInt(body.parent_id, null), body.image || null, toInt(body.sort_order, 0));
+  return created(res, { category: db.prepare('SELECT * FROM categories WHERE id = ?').get(Number(info.lastInsertRowid)) });
+}
+
+function updateCategory(req, res, id, body) {
+  const cat = db.prepare('SELECT * FROM categories WHERE id = ?').get(id);
+  if (!cat) return notFound(res, 'التصنيف غير موجود');
+  const name = body.name !== undefined ? String(body.name).trim() : cat.name;
+  db.prepare(`
+    UPDATE categories SET name = ?, parent_id = ?, image = ?, sort_order = ? WHERE id = ?
+  `).run(
+    name,
+    body.parent_id !== undefined ? toInt(body.parent_id, null) : cat.parent_id,
+    body.image !== undefined ? body.image : cat.image,
+    body.sort_order !== undefined ? toInt(body.sort_order, 0) : cat.sort_order,
+    id
+  );
+  return ok(res, { category: db.prepare('SELECT * FROM categories WHERE id = ?').get(id) });
+}
+
+function deleteCategory(req, res, id) {
+  const info = db.prepare('DELETE FROM categories WHERE id = ?').run(id);
+  if (info.changes === 0) return notFound(res, 'التصنيف غير موجود');
+  return ok(res, { message: 'تم حذف التصنيف' });
+}
+
+// ---- Manufacturers ----
+function createManufacturer(req, res, body) {
+  const missing = requireFields(body, ['name']);
+  if (missing) return badRequest(res, 'الاسم مطلوب');
+  const name = String(body.name).trim();
+  const slug = body.slug ? slugify(body.slug) : slugify(name);
+  if (db.prepare('SELECT id FROM manufacturers WHERE slug = ?').get(slug)) {
+    return badRequest(res, 'الاسم/الرابط مستخدم بالفعل');
+  }
+  const info = db
+    .prepare('INSERT INTO manufacturers (name, slug, logo) VALUES (?, ?, ?)')
+    .run(name, slug, body.logo || null);
+  return created(res, { manufacturer: db.prepare('SELECT * FROM manufacturers WHERE id = ?').get(Number(info.lastInsertRowid)) });
+}
+
+function updateManufacturer(req, res, id, body) {
+  const man = db.prepare('SELECT * FROM manufacturers WHERE id = ?').get(id);
+  if (!man) return notFound(res, 'الشركة غير موجودة');
+  const name = body.name !== undefined ? String(body.name).trim() : man.name;
+  db.prepare('UPDATE manufacturers SET name = ?, logo = ? WHERE id = ?')
+    .run(name, body.logo !== undefined ? body.logo : man.logo, id);
+  return ok(res, { manufacturer: db.prepare('SELECT * FROM manufacturers WHERE id = ?').get(id) });
+}
+
+function deleteManufacturer(req, res, id) {
+  const info = db.prepare('DELETE FROM manufacturers WHERE id = ?').run(id);
+  if (info.changes === 0) return notFound(res, 'الشركة غير موجودة');
+  return ok(res, { message: 'تم حذف الشركة' });
+}
+
+// ---- Models ----
+function createModel(req, res, body) {
+  const missing = requireFields(body, ['name', 'manufacturer_id']);
+  if (missing) return badRequest(res, 'الاسم والشركة مطلوبان');
+  const info = db
+    .prepare('INSERT INTO motorcycle_models (manufacturer_id, name, year) VALUES (?, ?, ?)')
+    .run(toInt(body.manufacturer_id), String(body.name).trim(), body.year ? String(body.year) : null);
+  return created(res, { model: db.prepare('SELECT * FROM motorcycle_models WHERE id = ?').get(Number(info.lastInsertRowid)) });
+}
+
+function updateModel(req, res, id, body) {
+  const model = db.prepare('SELECT * FROM motorcycle_models WHERE id = ?').get(id);
+  if (!model) return notFound(res, 'الموديل غير موجود');
+  db.prepare('UPDATE motorcycle_models SET name = ?, manufacturer_id = ?, year = ? WHERE id = ?')
+    .run(
+      body.name !== undefined ? String(body.name).trim() : model.name,
+      body.manufacturer_id !== undefined ? toInt(body.manufacturer_id) : model.manufacturer_id,
+      body.year !== undefined ? String(body.year) : model.year,
+      id
+    );
+  return ok(res, { model: db.prepare('SELECT * FROM motorcycle_models WHERE id = ?').get(id) });
+}
+
+function deleteModel(req, res, id) {
+  const info = db.prepare('DELETE FROM motorcycle_models WHERE id = ?').run(id);
+  if (info.changes === 0) return notFound(res, 'الموديل غير موجود');
+  return ok(res, { message: 'تم حذف الموديل' });
+}
+
+// ---- Orders ----
+function listOrdersAdmin(params) {
+  const page = Math.max(1, toInt(params.page, 1));
+  const pageSize = Math.min(100, Math.max(1, toInt(params.pageSize, 50)));
+  const offset = (page - 1) * pageSize;
+  const where = [];
+  const args = [];
+  if (params.status) {
+    where.push('order_status = ?');
+    args.push(params.status);
+  }
+  if (params.payment_status) {
+    where.push('payment_status = ?');
+    args.push(params.payment_status);
+  }
+  const whereSql = where.length ? `WHERE ${where.join(' AND ')}` : '';
+  const total = db.prepare(`SELECT COUNT(*) AS c FROM orders ${whereSql}`).get(...args).c;
+  const rows = db
+    .prepare(`SELECT * FROM orders ${whereSql} ORDER BY id DESC LIMIT ? OFFSET ?`)
+    .all(...args, pageSize, offset);
+  return { orders: rows, total, page, pageSize, totalPages: Math.ceil(total / pageSize) };
+}
+
+function getOrderAdmin(id) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  if (!order) return null;
+  const items = db.prepare('SELECT * FROM order_items WHERE order_id = ?').all(id);
+  const screenshots = db
+    .prepare('SELECT id, filename, path, created_at FROM payment_screenshots WHERE order_id = ?')
+    .all(id);
+  return { ...order, items, screenshots };
+}
+
+function updateOrderStatus(req, res, id, body) {
+  const order = db.prepare('SELECT * FROM orders WHERE id = ?').get(id);
+  if (!order) return notFound(res, 'الطلب غير موجود');
+
+  const validOrderStatus = ['new', 'processing', 'shipped', 'completed', 'cancelled'];
+  const validPaymentStatus = ['pending', 'under_review', 'paid', 'rejected'];
+
+  if (body.order_status !== undefined) {
+    if (!validOrderStatus.includes(body.order_status)) return badRequest(res, 'حالة طلب غير صالحة');
+    db.prepare('UPDATE orders SET order_status = ? WHERE id = ?').run(body.order_status, id);
+  }
+  if (body.payment_status !== undefined) {
+    if (!validPaymentStatus.includes(body.payment_status)) return badRequest(res, 'حالة دفع غير صالحة');
+    db.prepare('UPDATE orders SET payment_status = ? WHERE id = ?').run(body.payment_status, id);
+    db.prepare('UPDATE payments SET status = ? WHERE order_id = ?').run(body.payment_status, id);
+  }
+
+  return ok(res, { order: getOrderAdmin(id) });
+}
+
+// ---- Upload (product images) ----
+function uploadImage(req, res, rawBody, contentType) {
+  const m = contentType ? contentType.match(/boundary=(?:"([^"]+)"|([^;]+))/i) : null;
+  const boundary = m ? (m[1] || m[2]).trim() : null;
+  if (!boundary) return badRequest(res, 'يجب رفع صورة');
+  const { files } = parseMultipart(rawBody, boundary);
+  const file = files.find((f) => f.fieldname === 'image') || files[0];
+  if (!file) return badRequest(res, 'لم يتم رفع صورة');
+  const validation = validateImage(file);
+  if (!validation.ok) return badRequest(res, validation.error);
+  const saved = saveImage(file, 'product');
+  return created(res, { image: saved.path });
+}
+
+module.exports = {
+  login, logout, me,
+  dashboardStats,
+  listProductsAdmin, createProduct, updateProduct, deleteProduct, getProductAdmin,
+  createCategory, updateCategory, deleteCategory,
+  createManufacturer, updateManufacturer, deleteManufacturer,
+  createModel, updateModel, deleteModel,
+  listOrdersAdmin, getOrderAdmin, updateOrderStatus,
+  uploadImage,
+};

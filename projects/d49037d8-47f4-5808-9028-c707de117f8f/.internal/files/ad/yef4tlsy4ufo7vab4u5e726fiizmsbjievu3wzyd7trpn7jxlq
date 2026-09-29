@@ -1,0 +1,63 @@
+const server = require(process.argv[2]);
+const base = 'http://127.0.0.1:3000';
+
+async function main() {
+  const results = [];
+  async function get(path) {
+    const r = await fetch(base + path);
+    const j = await r.json();
+    results.push([path, r.status, JSON.stringify(j).slice(0, 200)]);
+    return j;
+  }
+
+  await get('/api/health');
+  const products = await get('/api/products?page=1&pageSize=3');
+  await get('/api/products?q=هوندا');
+  await get('/api/categories');
+  const mans = await get('/api/manufacturers');
+  await get('/api/manufacturers/models');
+  await get('/api/settings');
+
+  // product detail
+  if (products.products && products.products[0]) {
+    await get('/api/products/' + products.products[0].slug);
+  }
+
+  // admin unauthorized check
+  const unauth = await fetch(base + '/api/admin/stats');
+  results.push(['/api/admin/stats (no auth)', unauth.status, '']);
+
+  // admin login
+  const login = await fetch(base + '/api/auth/login', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'admin123' }),
+  });
+  const cookie = login.headers.get('set-cookie') || '';
+  results.push(['/api/auth/login', login.status, 'cookie=' + (cookie ? 'yes' : 'no')]);
+
+  const stats = await fetch(base + '/api/admin/stats', { headers: { cookie } });
+  results.push(['/api/admin/stats (auth)', stats.status, (await stats.text()).slice(0, 120)]);
+
+  // create order
+  const order = await fetch(base + '/api/orders', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_name: 'أحمد محمد',
+      phone: '01000000000',
+      governorate: 'القاهرة',
+      city: 'مدينة نصر',
+      address: 'شارع 10',
+      payment_method: 'wallet',
+      items: [{ product_id: 1, quantity: 2 }],
+    }),
+  });
+  results.push(['/api/orders POST', order.status, (await order.text()).slice(0, 200)]);
+
+  console.log(results.map((r) => r.join(' | ')).join('\n'));
+  server.close();
+  process.exit(0);
+}
+
+main().catch((e) => { console.error(e); process.exit(1); });

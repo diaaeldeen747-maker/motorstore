@@ -1,0 +1,11 @@
+{
+  "schemaVersion": 1,
+  "entries": [],
+  "onboardingPreambleProgressBySequence": {
+    "v1": {
+      "activeStepId": null,
+      "completedStepIds": [],
+      "sequenceVersion": 1
+    }
+  }
+}

@@ -1,0 +1,19 @@
+# Dependencies
+node_modules/
+
+# Environment
+.env
+
+# Database
+data/*.db
+data/*.db-journal
+data/*.db-wal
+data/*.db-shm
+
+# Uploads (user-generated content)
+public/uploads/*
+
+# OS / editor
+.DS_Store
+Thumbs.db
+*.log

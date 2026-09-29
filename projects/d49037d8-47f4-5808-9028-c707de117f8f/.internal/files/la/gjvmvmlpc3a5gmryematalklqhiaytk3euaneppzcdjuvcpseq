@@ -1,0 +1,805 @@
+import { apiGet, apiPost, apiPut, apiDelete, buildQuery } from './api.js';
+import { formatPrice, formatNumber, formatDate, toast, escapeHtml, el, emptyState, loadingState, errorState } from './ui.js';
+
+const app = document.getElementById('app');
+
+// ===== Auth check =====
+async function isLoggedIn() {
+  try {
+    await apiGet('/auth/me');
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+// ===== Login =====
+function renderLogin() {
+  app.innerHTML = '';
+  const card = el('div', { class: 'auth-card panel' });
+  card.appendChild(el('h1', { style: 'font-size:1.5rem;font-weight:800;margin-bottom:8px' }, 'لوحة الإدارة'));
+  card.appendChild(el('p', { class: 'text-muted mb-24' }, 'سجّل الدخول للوصول إلى لوحة التحكم'));
+
+  const form = el('form', { id: 'login-form' });
+  const userField = el('div', { class: 'form-field full' });
+  userField.appendChild(el('label', { for: 'username' }, 'اسم المستخدم'));
+  userField.appendChild(el('input', { id: 'username', name: 'username', type: 'text', required: 'required', autocomplete: 'username' }));
+  form.appendChild(userField);
+
+  const passField = el('div', { class: 'form-field full mt-16' });
+  passField.appendChild(el('label', { for: 'password' }, 'كلمة المرور'));
+  passField.appendChild(el('input', { id: 'password', name: 'password', type: 'password', required: 'required', autocomplete: 'current-password' }));
+  form.appendChild(passField);
+
+  const btn = el('button', { class: 'btn btn-primary mt-24', type: 'submit', style: 'width:100%' }, 'تسجيل الدخول');
+  form.appendChild(btn);
+  card.appendChild(form);
+
+  const errorBox = el('div', { class: 'mt-16', style: 'color:var(--red);font-weight:600;display:none;' });
+  card.appendChild(errorBox);
+
+  app.appendChild(card);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    errorBox.style.display = 'none';
+    btn.disabled = true;
+    btn.textContent = 'جارٍ الدخول...';
+    try {
+      await apiPost('/auth/login', {
+        username: document.getElementById('username').value,
+        password: document.getElementById('password').value,
+      });
+      toast('تم تسجيل الدخول', 'success');
+      location.hash = '#/admin';
+    } catch (err) {
+      errorBox.textContent = err.message;
+      errorBox.style.display = 'block';
+      btn.disabled = false;
+      btn.textContent = 'تسجيل الدخول';
+    }
+  });
+}
+
+// ===== Admin shell =====
+function renderShell(activeTab, contentEl) {
+  app.innerHTML = '';
+  const container = el('div', { class: 'container section' });
+  const layout = el('div', { class: 'admin-layout' });
+
+  const sidebar = el('nav', { class: 'admin-sidebar' });
+  const tabs = [
+    ['', 'الرئيسية', '📊'],
+    ['products', 'المنتجات', '📦'],
+    ['categories', 'التصنيفات', '🗂️'],
+    ['manufacturers', 'الشركات والموديلات', '🏭'],
+    ['orders', 'الطلبات', '🧾'],
+  ];
+  tabs.forEach(([key, label, icon]) => {
+    sidebar.appendChild(el('a', { href: `#/admin/${key}`, class: activeTab === key ? 'active' : '' }, `${icon} ${label}`));
+  });
+  const logout = el('a', { href: '#/', style: 'color:var(--red);margin-top:12px;border-top:1px solid var(--border);padding-top:12px;' }, '🚪 تسجيل الخروج');
+  logout.addEventListener('click', async (e) => {
+    e.preventDefault();
+    try { await apiPost('/auth/logout', {}); } catch {}
+    toast('تم تسجيل الخروج', 'info');
+    location.hash = '#/';
+  });
+  sidebar.appendChild(logout);
+
+  layout.appendChild(sidebar);
+  const content = el('div', {});
+  content.appendChild(contentEl);
+  layout.appendChild(content);
+  container.appendChild(layout);
+  app.appendChild(container);
+}
+
+// ===== Dashboard home =====
+async function renderDashboardHome() {
+  const wrap = el('div', {});
+  wrap.appendChild(loadingState());
+  renderShell('', wrap);
+  try {
+    const stats = await apiGet('/admin/stats');
+    wrap.innerHTML = '';
+
+    const grid = el('div', { class: 'stats-grid' });
+    const cards = [
+      ['الطلبات', stats.orders, '🧾'],
+      ['طلبات جديدة', stats.newOrders, '🆕'],
+      ['طلبات مدفوعة', stats.paidOrders, '💵'],
+      ['إجمالي المبيعات', formatPrice(stats.totalSales), '💰'],
+      ['المنتجات', stats.products, '📦'],
+      ['منخفضة المخزون', stats.lowStock, '⚠️'],
+    ];
+    cards.forEach(([label, value, icon]) => {
+      grid.appendChild(el('div', { class: 'stat-card' }, [
+        el('div', { class: 'stat-icon' }, icon),
+        el('div', { class: 'stat-label' }, label),
+        el('div', { class: 'stat-value' }, String(value)),
+      ]));
+    });
+    wrap.appendChild(grid);
+
+    // recent orders
+    const recent = el('div', { class: 'panel mt-24' });
+    recent.appendChild(el('h2', { style: 'font-weight:800;margin-bottom:14px' }, 'أحدث الطلبات'));
+    if (!stats.recentOrders.length) {
+      recent.appendChild(emptyState('لا توجد طلبات بعد', '🧾'));
+    } else {
+      const table = el('div', { class: 'table-wrap' });
+      const t = el('table', { class: 'data-table' });
+      t.appendChild(el('thead', {}, el('tr', {}, ['الرقم', 'العميل', 'الإجمالي', 'الدفع', 'الحالة', 'التاريخ'].map((h) => el('th', {}, h)))));
+      const tbody = el('tbody');
+      stats.recentOrders.forEach((o) => {
+        tbody.appendChild(el('tr', {}, [
+          el('td', { style: 'direction:ltr' }, o.order_number),
+          el('td', {}, o.customer_name),
+          el('td', {}, formatPrice(o.total)),
+          el('td', {}, statusBadge('payment', o.payment_status)),
+          el('td', {}, statusBadge('order', o.order_status)),
+          el('td', {}, formatDate(o.created_at)),
+        ]));
+      });
+      t.appendChild(tbody);
+      table.appendChild(t);
+      recent.appendChild(table);
+    }
+    wrap.appendChild(recent);
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+function statusBadge(type, status) {
+  const map = {
+    order: { new: 'جديد', processing: 'قيد التنفيذ', shipped: 'تم الشحن', completed: 'مكتمل', cancelled: 'ملغي' },
+    payment: { pending: 'قيد الانتظار', under_review: 'قيد المراجعة', paid: 'مدفوع', rejected: 'مرفوض' },
+  };
+  const label = map[type][status] || status;
+  return el('span', { class: `status-badge st-${status}` }, label);
+}
+
+// ===== Products management =====
+async function renderAdminProducts() {
+  const wrap = el('div', {});
+  wrap.appendChild(loadingState());
+  renderShell('products', wrap);
+  try {
+    const data = await apiGet('/admin/products?pageSize=100');
+    wrap.innerHTML = '';
+
+    const head = el('div', { class: 'flex-between mb-16' });
+    head.appendChild(el('h2', { style: 'font-weight:800;font-size:1.3rem' }, 'إدارة المنتجات'));
+    head.appendChild(el('button', { class: 'btn btn-primary btn-sm', id: 'add-product-btn' }, '+ إضافة منتج'));
+    wrap.appendChild(head);
+
+    const table = el('div', { class: 'table-wrap' });
+    const t = el('table', { class: 'data-table' });
+    t.appendChild(el('thead', {}, el('tr', {}, ['صورة', 'الاسم', 'السعر', 'الخصم', 'المخزون', 'التصنيف', 'الشركة', 'إجراءات'].map((h) => el('th', {}, h)))));
+    const tbody = el('tbody');
+    data.products.forEach((p) => {
+      const img = p.images && p.images.length
+        ? el('img', { src: p.images[0], style: 'width:44px;height:44px;object-fit:cover;border-radius:6px;' })
+        : el('div', { style: 'width:44px;height:44px;display:grid;place-items:center;background:#f1f5f9;border-radius:6px;' }, '🏍️');
+      const actions = el('td', {});
+      const edit = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, 'تعديل');
+      edit.addEventListener('click', () => openProductForm(p));
+      const del = el('button', { class: 'btn btn-danger btn-sm', type: 'button', style: 'margin-inline-start:6px' }, 'حذف');
+      del.addEventListener('click', async () => {
+        if (!confirm(`حذف المنتج "${p.name}"؟`)) return;
+        try { await apiDelete(`/admin/products/${p.id}`); toast('تم الحذف', 'success'); renderAdminProducts(); }
+        catch (e) { toast(e.message, 'error'); }
+      });
+      actions.appendChild(edit); actions.appendChild(del);
+
+      tbody.appendChild(el('tr', {}, [
+        el('td', {}, img),
+        el('td', {}, p.name),
+        el('td', {}, formatPrice(p.price)),
+        el('td', {}, p.discount > 0 ? `-${p.discount}%` : '—'),
+        el('td', {}, String(p.stock)),
+        el('td', {}, p.category_name || '—'),
+        el('td', {}, p.manufacturer_name || '—'),
+        actions,
+      ]));
+    });
+    t.appendChild(tbody);
+    table.appendChild(t);
+    wrap.appendChild(table);
+
+    document.getElementById('add-product-btn').addEventListener('click', () => openProductForm(null));
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+async function openProductForm(product) {
+  let cats = [], mans = [], models = [];
+  try {
+    [cats, mans] = await Promise.all([apiGet('/categories'), apiGet('/manufacturers')]);
+    models = (await apiGet('/manufacturers/models')).models;
+  } catch {}
+
+  const wrap = el('div', { class: 'panel' });
+  wrap.appendChild(el('h2', { style: 'font-weight:800;margin-bottom:16px' }, product ? 'تعديل المنتج' : 'إضافة منتج'));
+
+  const form = el('form', { id: 'product-form' });
+  const grid = el('div', { class: 'form-grid' });
+
+  const def = (v) => (v !== undefined && v !== null ? v : '');
+
+  const fields = [
+    { name: 'name', label: 'الاسم *', type: 'text', val: product ? product.name : '' },
+    { name: 'sku', label: 'SKU', type: 'text', val: product ? product.sku : '' },
+    { name: 'price', label: 'السعر *', type: 'number', val: product ? product.price : '' },
+    { name: 'old_price', label: 'السعر قبل الخصم', type: 'number', val: product ? product.old_price : '' },
+    { name: 'stock', label: 'المخزون', type: 'number', val: product ? product.stock : 0 },
+    { name: 'year', label: 'سنة الموديل', type: 'text', val: product ? product.year : '' },
+  ];
+  fields.forEach((f) => {
+    const field = el('div', { class: 'form-field' });
+    field.appendChild(el('label', { for: `p-${f.name}` }, f.label));
+    field.appendChild(el('input', { id: `p-${f.name}`, name: f.name, type: f.type, value: f.val, required: f.label.includes('*') ? 'required' : null, step: f.type === 'number' ? 'any' : null }));
+    grid.appendChild(field);
+  });
+
+  // category select
+  const catField = el('div', { class: 'form-field' });
+  catField.appendChild(el('label', { for: 'p-category' }, 'التصنيف'));
+  const catSel = el('select', { id: 'p-category', name: 'category_id' });
+  catSel.appendChild(el('option', { value: '' }, '—'));
+  cats.categories.forEach((c) => catSel.appendChild(el('option', { value: String(c.id), selected: product && product.category_id === c.id ? 'selected' : null }, c.name)));
+  catField.appendChild(catSel);
+  grid.appendChild(catField);
+
+  // manufacturer select
+  const manField = el('div', { class: 'form-field' });
+  manField.appendChild(el('label', { for: 'p-manufacturer' }, 'الشركة'));
+  const manSel = el('select', { id: 'p-manufacturer', name: 'manufacturer_id' });
+  manSel.appendChild(el('option', { value: '' }, '—'));
+  mans.manufacturers.forEach((m) => manSel.appendChild(el('option', { value: String(m.id), selected: product && product.manufacturer_id === m.id ? 'selected' : null }, m.name)));
+  manField.appendChild(manSel);
+  grid.appendChild(manField);
+
+  // model select
+  const modelField = el('div', { class: 'form-field' });
+  modelField.appendChild(el('label', { for: 'p-model' }, 'الموديل'));
+  const modelSel = el('select', { id: 'p-model', name: 'model_id' });
+  modelSel.appendChild(el('option', { value: '' }, '—'));
+  const fillModels = (manId) => {
+    modelSel.innerHTML = '';
+    modelSel.appendChild(el('option', { value: '' }, '—'));
+    models.filter((m) => m.manufacturer_id === manId).forEach((m) => {
+      modelSel.appendChild(el('option', { value: String(m.id), selected: product && product.model_id === m.id ? 'selected' : null }, m.name));
+    });
+  };
+  if (product && product.manufacturer_id) fillModels(product.manufacturer_id);
+  manSel.addEventListener('change', () => fillModels(Number(manSel.value)));
+  modelField.appendChild(modelSel);
+  grid.appendChild(modelField);
+
+  // status
+  const statusField = el('div', { class: 'form-field' });
+  statusField.appendChild(el('label', { for: 'p-status' }, 'الحالة'));
+  const statusSel = el('select', { id: 'p-status', name: 'status' });
+  statusSel.appendChild(el('option', { value: 'active', selected: !product || product.status === 'active' ? 'selected' : null }, 'نشط'));
+  statusSel.appendChild(el('option', { value: 'inactive', selected: product && product.status === 'inactive' ? 'selected' : null }, 'غير نشط'));
+  statusField.appendChild(statusSel);
+  grid.appendChild(statusField);
+
+  // compatibility
+  const compatField = el('div', { class: 'form-field full' });
+  compatField.appendChild(el('label', { for: 'p-compat' }, 'التوافق (Compatibility)'));
+  compatField.appendChild(el('input', { id: 'p-compat', name: 'compatibility', type: 'text', value: def(product ? product.compatibility : '') }));
+  grid.appendChild(compatField);
+
+  // description
+  const descField = el('div', { class: 'form-field full' });
+  descField.appendChild(el('label', { for: 'p-desc' }, 'الوصف'));
+  descField.appendChild(el('textarea', { id: 'p-desc', name: 'description' }, product ? product.description || '' : ''));
+  grid.appendChild(descField);
+
+  form.appendChild(grid);
+
+  // image upload
+  const imgSection = el('div', { class: 'mt-16' });
+  imgSection.appendChild(el('label', { style: 'font-weight:600;font-size:0.9rem' }, 'صور المنتج'));
+  const existingImages = (product && product.images) || [];
+  const imgList = el('div', { class: 'flex gap-8 mt-8', style: 'flex-wrap:wrap' });
+  const renderImgs = () => {
+    imgList.innerHTML = '';
+    existingImages.forEach((src, i) => {
+      const box = el('div', { style: 'position:relative' });
+      box.appendChild(el('img', { src, style: 'width:80px;height:80px;object-fit:cover;border-radius:8px;border:1px solid var(--border)' }));
+      const rm = el('button', { type: 'button', style: 'position:absolute;top:-6px;inset-inline-end:-6px;background:var(--red);color:#fff;width:22px;height:22px;border-radius:50%;font-size:0.8rem;' }, '×');
+      rm.addEventListener('click', () => { existingImages.splice(i, 1); renderImgs(); });
+      box.appendChild(rm);
+      imgList.appendChild(box);
+    });
+  };
+  renderImgs();
+  imgSection.appendChild(imgList);
+
+  const fileInput = el('input', { type: 'file', accept: 'image/jpeg,image/png,image/webp,image/gif', multiple: 'multiple', style: 'margin-top:10px' });
+  fileInput.addEventListener('change', async () => {
+    for (const file of fileInput.files) {
+      const fd = new FormData();
+      fd.append('image', file);
+      try {
+        const res = await apiPost('/admin/upload', fd);
+        existingImages.push(res.image);
+        renderImgs();
+        toast('تم رفع الصورة', 'success');
+      } catch (e) { toast(e.message, 'error'); }
+    }
+    fileInput.value = '';
+  });
+  imgSection.appendChild(fileInput);
+  form.appendChild(imgSection);
+
+  const actions = el('div', { class: 'flex gap-12 mt-24' });
+  const save = el('button', { class: 'btn btn-primary', type: 'submit' }, product ? 'حفظ التغييرات' : 'إضافة المنتج');
+  const cancel = el('button', { class: 'btn btn-ghost', type: 'button' }, 'إلغاء');
+  cancel.addEventListener('click', () => renderAdminProducts());
+  actions.appendChild(save); actions.appendChild(cancel);
+  form.appendChild(actions);
+
+  wrap.appendChild(form);
+  renderShell('products', wrap);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const fd = new FormData(form);
+    const body = {
+      name: fd.get('name'),
+      sku: fd.get('sku'),
+      price: Number(fd.get('price')),
+      old_price: fd.get('old_price') ? Number(fd.get('old_price')) : null,
+      stock: Number(fd.get('stock') || 0),
+      year: fd.get('year'),
+      category_id: fd.get('category_id') ? Number(fd.get('category_id')) : null,
+      manufacturer_id: fd.get('manufacturer_id') ? Number(fd.get('manufacturer_id')) : null,
+      model_id: fd.get('model_id') ? Number(fd.get('model_id')) : null,
+      status: fd.get('status'),
+      compatibility: fd.get('compatibility'),
+      description: fd.get('description'),
+      images: existingImages,
+    };
+    save.disabled = true;
+    try {
+      if (product) await apiPut(`/admin/products/${product.id}`, body);
+      else await apiPost('/admin/products', body);
+      toast(product ? 'تم الحفظ' : 'تمت الإضافة', 'success');
+      renderAdminProducts();
+    } catch (err) {
+      toast(err.message, 'error');
+      save.disabled = false;
+    }
+  });
+}
+
+// ===== Categories management =====
+async function renderAdminCategories() {
+  const wrap = el('div', {});
+  wrap.appendChild(loadingState());
+  renderShell('categories', wrap);
+  try {
+    const data = await apiGet('/categories');
+    wrap.innerHTML = '';
+
+    const head = el('div', { class: 'flex-between mb-16' });
+    head.appendChild(el('h2', { style: 'font-weight:800;font-size:1.3rem' }, 'إدارة التصنيفات'));
+    head.appendChild(el('button', { class: 'btn btn-primary btn-sm', id: 'add-cat-btn' }, '+ إضافة تصنيف'));
+    wrap.appendChild(head);
+
+    const table = el('div', { class: 'table-wrap' });
+    const t = el('table', { class: 'data-table' });
+    t.appendChild(el('thead', {}, el('tr', {}, ['الاسم', 'الرابط', 'الترتيب', 'إجراءات'].map((h) => el('th', {}, h)))));
+    const tbody = el('tbody');
+    data.categories.forEach((c) => {
+      const actions = el('td', {});
+      const edit = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, 'تعديل');
+      edit.addEventListener('click', () => openCategoryForm(c));
+      const del = el('button', { class: 'btn btn-danger btn-sm', type: 'button', style: 'margin-inline-start:6px' }, 'حذف');
+      del.addEventListener('click', async () => {
+        if (!confirm(`حذف التصنيف "${c.name}"؟`)) return;
+        try { await apiDelete(`/admin/categories/${c.id}`); toast('تم الحذف', 'success'); renderAdminCategories(); }
+        catch (e) { toast(e.message, 'error'); }
+      });
+      actions.appendChild(edit); actions.appendChild(del);
+      tbody.appendChild(el('tr', {}, [
+        el('td', {}, c.name),
+        el('td', { style: 'direction:ltr' }, c.slug),
+        el('td', {}, String(c.sort_order)),
+        actions,
+      ]));
+    });
+    t.appendChild(tbody);
+    table.appendChild(t);
+    wrap.appendChild(table);
+
+    document.getElementById('add-cat-btn').addEventListener('click', () => openCategoryForm(null));
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+function openCategoryForm(cat) {
+  const wrap = el('div', { class: 'panel' });
+  wrap.appendChild(el('h2', { style: 'font-weight:800;margin-bottom:16px' }, cat ? 'تعديل التصنيف' : 'إضافة تصنيف'));
+  const form = el('form', { id: 'cat-form' });
+  const grid = el('div', { class: 'form-grid' });
+  const nameField = el('div', { class: 'form-field full' });
+  nameField.appendChild(el('label', {}, 'الاسم *'));
+  nameField.appendChild(el('input', { id: 'cat-name', value: cat ? cat.name : '', required: 'required' }));
+  grid.appendChild(nameField);
+  const orderField = el('div', { class: 'form-field full' });
+  orderField.appendChild(el('label', {}, 'الترتيب'));
+  orderField.appendChild(el('input', { id: 'cat-order', type: 'number', value: cat ? cat.sort_order : 0 }));
+  grid.appendChild(orderField);
+  form.appendChild(grid);
+  const actions = el('div', { class: 'flex gap-12 mt-16' });
+  const save = el('button', { class: 'btn btn-primary', type: 'submit' }, 'حفظ');
+  const cancel = el('button', { class: 'btn btn-ghost', type: 'button' }, 'إلغاء');
+  cancel.addEventListener('click', () => renderAdminCategories());
+  actions.appendChild(save); actions.appendChild(cancel);
+  form.appendChild(actions);
+  wrap.appendChild(form);
+  renderShell('categories', wrap);
+
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = { name: document.getElementById('cat-name').value, sort_order: Number(document.getElementById('cat-order').value || 0) };
+    try {
+      if (cat) await apiPut(`/admin/categories/${cat.id}`, body);
+      else await apiPost('/admin/categories', body);
+      toast('تم الحفظ', 'success');
+      renderAdminCategories();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+// ===== Manufacturers & models =====
+async function renderAdminManufacturers() {
+  const wrap = el('div', {});
+  wrap.appendChild(loadingState());
+  renderShell('manufacturers', wrap);
+  try {
+    const [mans, models] = await Promise.all([apiGet('/manufacturers'), apiGet('/manufacturers/models')]);
+    wrap.innerHTML = '';
+
+    const head = el('div', { class: 'flex-between mb-16' });
+    head.appendChild(el('h2', { style: 'font-weight:800;font-size:1.3rem' }, 'الشركات والموديلات'));
+    head.appendChild(el('button', { class: 'btn btn-primary btn-sm', id: 'add-man-btn' }, '+ إضافة شركة'));
+    wrap.appendChild(head);
+
+    mans.manufacturers.forEach((m) => {
+      const panel = el('div', { class: 'panel mb-16' });
+      const headRow = el('div', { class: 'flex-between' });
+      headRow.appendChild(el('h3', { style: 'font-weight:800' }, m.name));
+      const actions = el('div', { class: 'flex gap-8' });
+      const addModel = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, '+ موديل');
+      addModel.addEventListener('click', () => openModelForm(null, m.id, m.name));
+      const edit = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, 'تعديل');
+      edit.addEventListener('click', () => openManufacturerForm(m));
+      const del = el('button', { class: 'btn btn-danger btn-sm', type: 'button' }, 'حذف');
+      del.addEventListener('click', async () => {
+        if (!confirm(`حذف الشركة "${m.name}" وجميع موديلاتها؟`)) return;
+        try { await apiDelete(`/admin/manufacturers/${m.id}`); toast('تم الحذف', 'success'); renderAdminManufacturers(); }
+        catch (e) { toast(e.message, 'error'); }
+      });
+      actions.appendChild(addModel); actions.appendChild(edit); actions.appendChild(del);
+      headRow.appendChild(actions);
+      panel.appendChild(headRow);
+
+      const modelList = models.models.filter((mm) => mm.manufacturer_id === m.id);
+      if (modelList.length) {
+        const chips = el('div', { class: 'flex gap-8 mt-16', style: 'flex-wrap:wrap' });
+        modelList.forEach((mm) => {
+          const chip = el('div', { class: 'flex gap-8', style: 'align-items:center;background:var(--surface-2);border:1px solid var(--border);border-radius:999px;padding:4px 12px;font-size:0.85rem;' });
+          chip.appendChild(el('span', {}, mm.name + (mm.year ? ` (${mm.year})` : '')));
+          const me = el('button', { type: 'button', style: 'color:var(--accent);font-weight:700' }, '✎');
+          me.addEventListener('click', () => openModelForm(mm, m.id, m.name));
+          const md = el('button', { type: 'button', style: 'color:var(--red);font-weight:700' }, '×');
+          md.addEventListener('click', async () => {
+            if (!confirm(`حذف الموديل "${mm.name}"؟`)) return;
+            try { await apiDelete(`/admin/models/${mm.id}`); toast('تم الحذف', 'success'); renderAdminManufacturers(); }
+            catch (e) { toast(e.message, 'error'); }
+          });
+          chip.appendChild(me); chip.appendChild(md);
+          chips.appendChild(chip);
+        });
+        panel.appendChild(chips);
+      } else {
+        panel.appendChild(el('p', { class: 'text-muted mt-8', style: 'font-size:0.85rem' }, 'لا توجد موديلات'));
+      }
+      wrap.appendChild(panel);
+    });
+
+    document.getElementById('add-man-btn').addEventListener('click', () => openManufacturerForm(null));
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+function openManufacturerForm(man) {
+  const wrap = el('div', { class: 'panel' });
+  wrap.appendChild(el('h2', { style: 'font-weight:800;margin-bottom:16px' }, man ? 'تعديل الشركة' : 'إضافة شركة'));
+  const form = el('form', { id: 'man-form' });
+  const field = el('div', { class: 'form-field full' });
+  field.appendChild(el('label', {}, 'اسم الشركة *'));
+  field.appendChild(el('input', { id: 'man-name', value: man ? man.name : '', required: 'required' }));
+  form.appendChild(field);
+  const actions = el('div', { class: 'flex gap-12 mt-16' });
+  const save = el('button', { class: 'btn btn-primary', type: 'submit' }, 'حفظ');
+  const cancel = el('button', { class: 'btn btn-ghost', type: 'button' }, 'إلغاء');
+  cancel.addEventListener('click', () => renderAdminManufacturers());
+  actions.appendChild(save); actions.appendChild(cancel);
+  form.appendChild(actions);
+  wrap.appendChild(form);
+  renderShell('manufacturers', wrap);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    try {
+      if (man) await apiPut(`/admin/manufacturers/${man.id}`, { name: document.getElementById('man-name').value });
+      else await apiPost('/admin/manufacturers', { name: document.getElementById('man-name').value });
+      toast('تم الحفظ', 'success');
+      renderAdminManufacturers();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+function openModelForm(model, manufacturerId, manufacturerName) {
+  const wrap = el('div', { class: 'panel' });
+  wrap.appendChild(el('h2', { style: 'font-weight:800;margin-bottom:16px' }, `${model ? 'تعديل' : 'إضافة'} موديل — ${manufacturerName}`));
+  const form = el('form', { id: 'model-form' });
+  const grid = el('div', { class: 'form-grid' });
+  const nameField = el('div', { class: 'form-field full' });
+  nameField.appendChild(el('label', {}, 'اسم الموديل *'));
+  nameField.appendChild(el('input', { id: 'model-name', value: model ? model.name : '', required: 'required' }));
+  grid.appendChild(nameField);
+  const yearField = el('div', { class: 'form-field full' });
+  yearField.appendChild(el('label', {}, 'سنة الموديل (اختياري)'));
+  yearField.appendChild(el('input', { id: 'model-year', value: model ? model.year || '' : '' }));
+  grid.appendChild(yearField);
+  form.appendChild(grid);
+  const actions = el('div', { class: 'flex gap-12 mt-16' });
+  const save = el('button', { class: 'btn btn-primary', type: 'submit' }, 'حفظ');
+  const cancel = el('button', { class: 'btn btn-ghost', type: 'button' }, 'إلغاء');
+  cancel.addEventListener('click', () => renderAdminManufacturers());
+  actions.appendChild(save); actions.appendChild(cancel);
+  form.appendChild(actions);
+  wrap.appendChild(form);
+  renderShell('manufacturers', wrap);
+  form.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const body = { name: document.getElementById('model-name').value, manufacturer_id: manufacturerId, year: document.getElementById('model-year').value };
+    try {
+      if (model) await apiPut(`/admin/models/${model.id}`, body);
+      else await apiPost('/admin/models', body);
+      toast('تم الحفظ', 'success');
+      renderAdminManufacturers();
+    } catch (err) { toast(err.message, 'error'); }
+  });
+}
+
+// ===== Orders management =====
+async function renderAdminOrders() {
+  const wrap = el('div', {});
+  wrap.appendChild(loadingState());
+  renderShell('orders', wrap);
+  try {
+    const data = await apiGet('/admin/orders?pageSize=100');
+    wrap.innerHTML = '';
+
+    const head = el('div', { class: 'flex-between mb-16' });
+    head.appendChild(el('h2', { style: 'font-weight:800;font-size:1.3rem' }, 'إدارة الطلبات'));
+    const filterSel = el('select', { id: 'order-filter' });
+    [['', 'كل الطلبات'], ['new', 'جديد'], ['processing', 'قيد التنفيذ'], ['shipped', 'تم الشحن'], ['completed', 'مكتمل'], ['cancelled', 'ملغي']]
+      .forEach(([v, l]) => filterSel.appendChild(el('option', { value: v }, l)));
+    filterSel.addEventListener('change', () => renderAdminOrdersFiltered(filterSel.value));
+    head.appendChild(filterSel);
+    wrap.appendChild(head);
+
+    const table = el('div', { class: 'table-wrap' });
+    const t = el('table', { class: 'data-table' });
+    t.appendChild(el('thead', {}, el('tr', {}, ['الرقم', 'العميل', 'الهاتف', 'الإجمالي', 'الدفع', 'حالة الدفع', 'حالة الطلب', 'التاريخ', ''].map((h) => el('th', {}, h)))));
+    const tbody = el('tbody');
+    data.orders.forEach((o) => {
+      const view = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, 'عرض');
+      view.addEventListener('click', () => openOrderDetail(o.id));
+      tbody.appendChild(el('tr', {}, [
+        el('td', { style: 'direction:ltr' }, o.order_number),
+        el('td', {}, o.customer_name),
+        el('td', { style: 'direction:ltr' }, o.phone),
+        el('td', {}, formatPrice(o.total)),
+        el('td', {}, o.payment_method === 'wallet' ? 'محفظة' : 'InstaPay'),
+        el('td', {}, statusBadge('payment', o.payment_status)),
+        el('td', {}, statusBadge('order', o.order_status)),
+        el('td', {}, formatDate(o.created_at)),
+        el('td', {}, view),
+      ]));
+    });
+    t.appendChild(tbody);
+    table.appendChild(t);
+    wrap.appendChild(table);
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+async function renderAdminOrdersFiltered(status) {
+  const wrap = el('div', { class: 'panel' });
+  wrap.appendChild(loadingState());
+  renderShell('orders', wrap);
+  try {
+    const data = await apiGet('/admin/orders' + buildQuery({ status, pageSize: 100 }));
+    wrap.innerHTML = '';
+    const back = el('button', { class: 'btn btn-ghost btn-sm mb-16', type: 'button' }, '‹ رجوع');
+    back.addEventListener('click', () => renderAdminOrders());
+    wrap.appendChild(back);
+    const table = el('div', { class: 'table-wrap' });
+    const t = el('table', { class: 'data-table' });
+    t.appendChild(el('thead', {}, el('tr', {}, ['الرقم', 'العميل', 'الإجمالي', 'حالة الدفع', 'حالة الطلب', ''].map((h) => el('th', {}, h)))));
+    const tbody = el('tbody');
+    data.orders.forEach((o) => {
+      const view = el('button', { class: 'btn btn-ghost btn-sm', type: 'button' }, 'عرض');
+      view.addEventListener('click', () => openOrderDetail(o.id));
+      tbody.appendChild(el('tr', {}, [
+        el('td', { style: 'direction:ltr' }, o.order_number),
+        el('td', {}, o.customer_name),
+        el('td', {}, formatPrice(o.total)),
+        el('td', {}, statusBadge('payment', o.payment_status)),
+        el('td', {}, statusBadge('order', o.order_status)),
+        el('td', {}, view),
+      ]));
+    });
+    t.appendChild(tbody);
+    table.appendChild(t);
+    wrap.appendChild(table);
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+async function openOrderDetail(orderId) {
+  const wrap = el('div', { class: 'panel' });
+  wrap.appendChild(loadingState());
+  renderShell('orders', wrap);
+  try {
+    const data = await apiGet(`/admin/orders/${orderId}`);
+    const o = data.order;
+    wrap.innerHTML = '';
+
+    const back = el('button', { class: 'btn btn-ghost btn-sm mb-16', type: 'button' }, '‹ رجوع للطلبات');
+    back.addEventListener('click', () => renderAdminOrders());
+    wrap.appendChild(back);
+
+    const head = el('div', { class: 'flex-between mb-16' });
+    head.appendChild(el('h2', { style: 'font-weight:800;font-size:1.3rem' }, `طلب ${o.order_number}`));
+    head.appendChild(el('span', { class: 'status-badge st-' + o.payment_status }, statusBadge('payment', o.payment_status).textContent));
+    wrap.appendChild(head);
+
+    // customer info
+    const infoGrid = el('div', { class: 'form-grid mb-24' });
+    const infoRows = [
+      ['الاسم', o.customer_name], ['الهاتف', o.phone], ['واتساب', o.whatsapp || '—'],
+      ['المحافظة', o.governorate], ['المدينة', o.city], ['العنوان', o.address],
+      ['ملاحظات', o.notes || '—'], ['طريقة الدفع', o.payment_method === 'wallet' ? 'المحفظة' : 'InstaPay'],
+      ['رقم العملية', o.transaction_id || '—'], ['التاريخ', formatDate(o.created_at)],
+    ];
+    infoRows.forEach(([k, v]) => {
+      const f = el('div', { class: 'form-field' });
+      f.appendChild(el('label', {}, k));
+      f.appendChild(el('div', { style: 'padding:10px;background:var(--surface-2);border-radius:8px;' }, v));
+      infoGrid.appendChild(f);
+    });
+    wrap.appendChild(infoGrid);
+
+    // items
+    const itemsPanel = el('div', { class: 'panel mb-16' });
+    itemsPanel.appendChild(el('h3', { style: 'font-weight:800;margin-bottom:12px' }, 'المنتجات'));
+    const table = el('div', { class: 'table-wrap' });
+    const t = el('table', { class: 'data-table' });
+    t.appendChild(el('thead', {}, el('tr', {}, ['المنتج', 'السعر', 'الكمية', 'الإجمالي'].map((h) => el('th', {}, h)))));
+    const tbody = el('tbody');
+    o.items.forEach((it) => {
+      tbody.appendChild(el('tr', {}, [
+        el('td', {}, it.name),
+        el('td', {}, formatPrice(it.price)),
+        el('td', {}, String(it.quantity)),
+        el('td', {}, formatPrice(it.price * it.quantity)),
+      ]));
+    });
+    t.appendChild(tbody);
+    table.appendChild(t);
+    itemsPanel.appendChild(table);
+    itemsPanel.appendChild(el('div', { class: 'summary-row' }, [el('span', {}, 'المجموع الفرعي'), el('strong', {}, formatPrice(o.subtotal))]));
+    itemsPanel.appendChild(el('div', { class: 'summary-row' }, [el('span', {}, 'الشحن'), el('strong', {}, formatPrice(o.shipping))]));
+    itemsPanel.appendChild(el('div', { class: 'summary-row total' }, [el('span', {}, 'الإجمالي'), el('strong', { class: 'val' }, formatPrice(o.total))]));
+    wrap.appendChild(itemsPanel);
+
+    // screenshots
+    if (o.screenshots && o.screenshots.length) {
+      const shots = el('div', { class: 'panel mb-16' });
+      shots.appendChild(el('h3', { style: 'font-weight:800;margin-bottom:12px' }, 'إثبات الدفع'));
+      const imgs = el('div', { class: 'flex gap-12', style: 'flex-wrap:wrap' });
+      o.screenshots.forEach((sc) => {
+        const img = el('img', { src: sc.path, alt: 'إثبات الدفع', style: 'width:160px;height:160px;object-fit:cover;border-radius:10px;cursor:zoom-in;border:1px solid var(--border)' });
+        img.addEventListener('click', () => openLightbox(sc.path));
+        imgs.appendChild(img);
+      });
+      shots.appendChild(imgs);
+      shots.appendChild(el('p', { class: 'text-muted mt-8', style: 'font-size:0.8rem' }, 'اضغط على الصورة لتكبيرها'));
+      wrap.appendChild(shots);
+    }
+
+    // actions
+    const actionsPanel = el('div', { class: 'panel' });
+    actionsPanel.appendChild(el('h3', { style: 'font-weight:800;margin-bottom:12px' }, 'إجراءات'));
+
+    const paymentActions = el('div', { class: 'flex gap-8 mb-16', style: 'flex-wrap:wrap' });
+    const approve = el('button', { class: 'btn btn-primary btn-sm', type: 'button' }, 'قبول الدفع');
+    approve.addEventListener('click', () => updateOrder(orderId, { payment_status: 'paid' }));
+    const reject = el('button', { class: 'btn btn-danger btn-sm', type: 'button' }, 'رفض الدفع');
+    reject.addEventListener('click', () => updateOrder(orderId, { payment_status: 'rejected' }));
+    paymentActions.appendChild(approve); paymentActions.appendChild(reject);
+    actionsPanel.appendChild(paymentActions);
+
+    const statusActions = el('div', { class: 'flex gap-8', style: 'flex-wrap:wrap' });
+    [['processing', 'قيد التنفيذ'], ['shipped', 'تم الشحن'], ['completed', 'مكتمل'], ['cancelled', 'ملغي']].forEach(([val, label]) => {
+      const b = el('button', { class: 'btn btn-ghost btn-sm', type: 'button', disabled: o.order_status === val ? 'disabled' : null }, label);
+      b.addEventListener('click', () => updateOrder(orderId, { order_status: val }));
+      statusActions.appendChild(b);
+    });
+    actionsPanel.appendChild(el('div', { class: 'text-muted mb-8', style: 'font-size:0.85rem;font-weight:600' }, 'تغيير حالة الطلب:'));
+    actionsPanel.appendChild(statusActions);
+
+    wrap.appendChild(actionsPanel);
+  } catch (e) {
+    wrap.innerHTML = '';
+    wrap.appendChild(errorState(e.message));
+  }
+}
+
+async function updateOrder(orderId, body) {
+  try {
+    await apiPut(`/admin/orders/${orderId}`, body);
+    toast('تم التحديث', 'success');
+    openOrderDetail(orderId);
+  } catch (e) { toast(e.message, 'error'); }
+}
+
+function openLightbox(src) {
+  const backdrop = el('div', { class: 'modal-backdrop' });
+  backdrop.appendChild(el('img', { src, alt: 'إثبات الدفع' }));
+  const close = el('button', { class: 'close', type: 'button' }, '×');
+  close.addEventListener('click', () => backdrop.remove());
+  backdrop.appendChild(close);
+  backdrop.addEventListener('click', (e) => { if (e.target === backdrop) backdrop.remove(); });
+  document.body.appendChild(backdrop);
+}
+
+// ===== Entry =====
+export async function renderAdmin(subTab) {
+  const logged = await isLoggedIn();
+  if (!logged) {
+    renderLogin();
+    return;
+  }
+  switch (subTab) {
+    case 'products': return renderAdminProducts();
+    case 'categories': return renderAdminCategories();
+    case 'manufacturers': return renderAdminManufacturers();
+    case 'orders': return renderAdminOrders();
+    default: return renderDashboardHome();
+  }
+}

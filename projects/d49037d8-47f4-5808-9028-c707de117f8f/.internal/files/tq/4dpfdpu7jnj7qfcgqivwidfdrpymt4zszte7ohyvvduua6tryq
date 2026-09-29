@@ -1,0 +1,295 @@
+'use strict';
+
+const http = require('node:http');
+const fs = require('node:fs');
+const path = require('node:path');
+const { URL } = require('node:url');
+
+const config = require('./config');
+const { db } = require('./db');
+const { requireAdmin } = require('./auth');
+const {
+  sendJson, ok, badRequest, unauthorized, notFound, serverError, toInt,
+} = require('./helpers');
+
+const publicApi = require('./routes/public');
+const ordersApi = require('./routes/orders');
+const adminApi = require('./routes/admin');
+
+const PUBLIC_DIR = path.join(config.root, 'public');
+
+const MIME = {
+  '.html': 'text/html; charset=utf-8',
+  '.css': 'text/css; charset=utf-8',
+  '.js': 'text/javascript; charset=utf-8',
+  '.json': 'application/json; charset=utf-8',
+  '.svg': 'image/svg+xml',
+  '.png': 'image/png',
+  '.jpg': 'image/jpeg',
+  '.jpeg': 'image/jpeg',
+  '.webp': 'image/webp',
+  '.gif': 'image/gif',
+  '.ico': 'image/x-icon',
+  '.woff': 'font/woff',
+  '.woff2': 'font/woff2',
+};
+
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let size = 0;
+    req.on('data', (c) => {
+      size += c.length;
+      if (size > config.maxUploadBytes + 1024 * 1024) {
+        reject(new Error('body_too_large'));
+        req.destroy();
+        return;
+      }
+      chunks.push(c);
+    });
+    req.on('end', () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+function parseJson(buf) {
+  try {
+    return JSON.parse(buf.toString('utf8'));
+  } catch {
+    return null;
+  }
+}
+
+function serveStatic(req, res, pathname) {
+  let filePath = pathname === '/' ? '/index.html' : pathname;
+  // Prevent path traversal
+  const safe = path.normalize(path.join(PUBLIC_DIR, filePath));
+  if (!safe.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403);
+    return res.end('Forbidden');
+  }
+  fs.readFile(safe, (err, data) => {
+    if (err) {
+      res.writeHead(404);
+      return res.end('Not Found');
+    }
+    const ext = path.extname(safe).toLowerCase();
+    const type = MIME[ext] || 'application/octet-stream';
+    res.writeHead(200, {
+      'Content-Type': type,
+      'Content-Length': data.length,
+      'Cache-Control': ext === '.html' ? 'no-cache' : 'public, max-age=31536000, immutable',
+    });
+    res.end(data);
+  });
+}
+
+async function handleApi(req, res, pathname, query) {
+  const method = req.method;
+  const parts = pathname.split('/').filter(Boolean); // e.g. ['api','products','123']
+
+  // ---- Public auth-independent routes ----
+  // GET /api/health
+  if (parts.length === 2 && parts[1] === 'health') {
+    return ok(res, { status: 'ok', time: new Date().toISOString() });
+  }
+
+  // GET /api/settings (public payment info)
+  if (parts.length === 2 && parts[1] === 'settings') {
+    return ok(res, {
+      wallet_number: config.walletNumber,
+      shipping_fee: ordersApi.SHIPPING_FEE,
+      payment_methods: ['instapay', 'wallet'],
+    });
+  }
+
+  // ---- Auth routes ----
+  if (parts.length === 3 && parts[1] === 'auth' && parts[2] === 'login' && method === 'POST') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.login(req, res, body);
+  }
+  if (parts.length === 3 && parts[1] === 'auth' && parts[2] === 'logout' && method === 'POST') {
+    return adminApi.logout(req, res);
+  }
+  if (parts.length === 3 && parts[1] === 'auth' && parts[2] === 'me' && method === 'GET') {
+    const auth = requireAdmin(req, res);
+    if (auth.error) return sendJson(res, auth.status, { error: auth.error });
+    return adminApi.me(req, res, auth.user);
+  }
+
+  // ---- Public catalog ----
+  if (parts.length === 2 && parts[1] === 'products' && method === 'GET') {
+    return ok(res, publicApi.listProducts(query));
+  }
+  if (parts.length === 3 && parts[1] === 'products' && method === 'GET') {
+    const product = publicApi.getProduct(parts[2]);
+    if (!product) return notFound(res, 'المنتج غير موجود');
+    return ok(res, { product, related: publicApi.getRelated(product) });
+  }
+  if (parts.length === 2 && parts[1] === 'categories' && method === 'GET') {
+    return ok(res, { categories: publicApi.listCategories() });
+  }
+  if (parts.length === 2 && parts[1] === 'manufacturers' && method === 'GET') {
+    return ok(res, { manufacturers: publicApi.listManufacturers() });
+  }
+  if (parts.length === 3 && parts[1] === 'manufacturers' && parts[2] === 'models' && method === 'GET') {
+    return ok(res, { models: publicApi.listModels() });
+  }
+  if (parts.length === 4 && parts[1] === 'manufacturers' && parts[3] === 'models' && method === 'GET') {
+    return ok(res, { models: publicApi.listModels(parts[2]) });
+  }
+
+  // ---- Orders (public) ----
+  if (parts.length === 2 && parts[1] === 'orders' && method === 'POST') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return ordersApi.createOrder(req, res, body);
+  }
+  if (parts.length === 4 && parts[1] === 'orders' && parts[2] === 'access' && method === 'GET') {
+    const order = ordersApi.getOrderByAccessToken(parts[3]);
+    if (!order) return notFound(res, 'الطلب غير موجود');
+    return ok(res, { order });
+  }
+  if (
+    parts.length === 4 && parts[1] === 'orders' && parts[3] === 'payment-proof' && method === 'POST'
+  ) {
+    const rawBody = await readBody(req);
+    return ordersApi.uploadPaymentProof(req, res, { id: parts[2] }, rawBody, req.headers['content-type']);
+  }
+
+  // ---- Admin routes (protected) ----
+  const auth = requireAdmin(req, res);
+  if (auth.error) return sendJson(res, auth.status, { error: auth.error });
+
+  // Dashboard
+  if (parts.length === 2 && parts[1] === 'admin' && parts[2] === undefined) {
+    // handled below
+  }
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'stats' && method === 'GET') {
+    return ok(res, adminApi.dashboardStats());
+  }
+
+  // Admin products
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'products' && method === 'GET') {
+    return ok(res, adminApi.listProductsAdmin(query));
+  }
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'products' && method === 'POST') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.createProduct(req, res, body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'products' && method === 'GET') {
+    const product = adminApi.getProductAdmin(toInt(parts[3]));
+    if (!product) return notFound(res, 'المنتج غير موجود');
+    return ok(res, { product });
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'products' && method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.updateProduct(req, res, toInt(parts[3]), body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'products' && method === 'DELETE') {
+    return adminApi.deleteProduct(req, res, toInt(parts[3]));
+  }
+
+  // Admin upload image
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'upload' && method === 'POST') {
+    const rawBody = await readBody(req);
+    return adminApi.uploadImage(req, res, rawBody, req.headers['content-type']);
+  }
+
+  // Admin categories
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'categories' && method === 'POST') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.createCategory(req, res, body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'categories' && method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.updateCategory(req, res, toInt(parts[3]), body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'categories' && method === 'DELETE') {
+    return adminApi.deleteCategory(req, res, toInt(parts[3]));
+  }
+
+  // Admin manufacturers
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'manufacturers' && method === 'POST') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.createManufacturer(req, res, body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'manufacturers' && method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.updateManufacturer(req, res, toInt(parts[3]), body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'manufacturers' && method === 'DELETE') {
+    return adminApi.deleteManufacturer(req, res, toInt(parts[3]));
+  }
+
+  // Admin models
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'models' && method === 'POST') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.createModel(req, res, body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'models' && method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.updateModel(req, res, toInt(parts[3]), body);
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'models' && method === 'DELETE') {
+    return adminApi.deleteModel(req, res, toInt(parts[3]));
+  }
+
+  // Admin orders
+  if (parts.length === 3 && parts[1] === 'admin' && parts[2] === 'orders' && method === 'GET') {
+    return ok(res, adminApi.listOrdersAdmin(query));
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'orders' && method === 'GET') {
+    const order = adminApi.getOrderAdmin(toInt(parts[3]));
+    if (!order) return notFound(res, 'الطلب غير موجود');
+    return ok(res, { order });
+  }
+  if (parts.length === 4 && parts[1] === 'admin' && parts[2] === 'orders' && method === 'PUT') {
+    const body = parseJson(await readBody(req));
+    if (!body) return badRequest(res, 'JSON غير صالح');
+    return adminApi.updateOrderStatus(req, res, toInt(parts[3]), body);
+  }
+
+  return notFound(res, 'API endpoint غير موجود');
+}
+
+const server = http.createServer(async (req, res) => {
+  try {
+    const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+    const pathname = decodeURIComponent(url.pathname);
+    const query = Object.fromEntries(url.searchParams.entries());
+
+    if (pathname.startsWith('/api/')) {
+      await handleApi(req, res, pathname, query);
+    } else {
+      serveStatic(req, res, pathname);
+    }
+  } catch (e) {
+    if (e && e.message === 'body_too_large') {
+      return sendJson(res, 413, { error: 'حجم الملف كبير جدًا' });
+    }
+    console.error('[server error]', e);
+    if (!res.headersSent) {
+      sendJson(res, 500, { error: 'خطأ داخلي في الخادم' });
+    } else {
+      res.end();
+    }
+  }
+});
+
+server.listen(config.port, config.host, () => {
+  console.log(`✅ MotorStore server running at http://${config.host}:${config.port}`);
+  console.log(`   Admin login: ${config.adminUsername} / ${config.adminPassword}`);
+  console.log(`   Wallet: ${config.walletNumber}`);
+});
+
+module.exports = server;

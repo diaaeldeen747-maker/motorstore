@@ -1,0 +1,134 @@
+const server = require(process.argv[2]);
+const base = 'http://127.0.0.1:3000';
+const fs = require('node:fs');
+const path = require('node:path');
+
+// create a tiny valid PNG
+const png = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+M9QDwADhgGAWjR9awAAAABJRU5ErkJggg==', 'base64');
+
+async function main() {
+  const out = [];
+  const log = (name, status, extra = '') => out.push(`${name} -> ${status} ${extra}`);
+
+  // health
+  let r = await fetch(base + '/api/health');
+  log('health', r.status);
+
+  // products
+  r = await fetch(base + '/api/products?pageSize=3');
+  const prodData = await r.json();
+  log('products list', r.status, `count=${prodData.total}`);
+
+  // search
+  r = await fetch(base + '/api/products?q=هوندا');
+  const searchData = await r.json();
+  log('search هوندا', r.status, `count=${searchData.total}`);
+
+  // admin login
+  r = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'admin123' }),
+  });
+  const cookie = r.headers.get('set-cookie') || '';
+  log('login', r.status, cookie ? 'cookie=yes' : 'cookie=NO');
+
+  // wrong password
+  r = await fetch(base + '/api/auth/login', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ username: 'admin', password: 'wrong' }),
+  });
+  log('login wrong pw', r.status);
+
+  // admin stats
+  r = await fetch(base + '/api/admin/stats', { headers: { cookie } });
+  log('admin stats', r.status);
+
+  // create category
+  r = await fetch(base + '/api/admin/categories', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({ name: 'فئة تجريبية' }),
+  });
+  log('create category', r.status);
+
+  // create manufacturer + model
+  r = await fetch(base + '/api/admin/manufacturers', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({ name: 'TestBrand' }),
+  });
+  const man = await r.json();
+  log('create manufacturer', r.status, `id=${man.manufacturer && man.manufacturer.id}`);
+
+  r = await fetch(base + '/api/admin/models', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({ name: 'TestModel', manufacturer_id: man.manufacturer.id }),
+  });
+  log('create model', r.status);
+
+  // upload product image (multipart)
+  const fd = new FormData();
+  fd.append('image', new Blob([png], { type: 'image/png' }), 'test.png');
+  r = await fetch(base + '/api/admin/upload', { method: 'POST', headers: { cookie }, body: fd });
+  const up = await r.json();
+  log('upload image', r.status, up.image || '');
+
+  // create product with image
+  r = await fetch(base + '/api/admin/products', {
+    method: 'POST', headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({
+      name: 'منتج تجريبي', price: 500, old_price: 600, stock: 10,
+      category_id: 1, manufacturer_id: man.manufacturer.id, images: [up.image],
+    }),
+  });
+  const prod = await r.json();
+  log('create product', r.status, `id=${prod.product && prod.product.id}`);
+
+  // create order
+  r = await fetch(base + '/api/orders', {
+    method: 'POST', headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      customer_name: 'أحمد', phone: '01000000000', governorate: 'القاهرة', city: 'مدينة نصر',
+      address: 'شارع 10', payment_method: 'instapay',
+      items: [{ product_id: prod.product.id, quantity: 2 }],
+    }),
+  });
+  const order = await r.json();
+  log('create order', r.status, `token=${order.order && order.order.access_token ? 'yes' : 'NO'}`);
+
+  // get order by access token
+  r = await fetch(base + '/api/orders/access/' + order.order.access_token);
+  const gotOrder = await r.json();
+  log('get order by token', r.status, `items=${gotOrder.order && gotOrder.order.items.length}`);
+
+  // upload payment proof (multipart)
+  const pfd = new FormData();
+  pfd.append('screenshot', new Blob([png], { type: 'image/png' }), 'proof.png');
+  pfd.append('transaction_id', 'TX123456');
+  r = await fetch(base + '/api/orders/' + order.order.id + '/payment-proof', { method: 'POST', body: pfd });
+  const proof = await r.json();
+  log('upload payment proof', r.status, `screenshots=${proof.order && proof.order.screenshots.length}`);
+
+  // admin view order
+  r = await fetch(base + '/api/admin/orders/' + order.order.id, { headers: { cookie } });
+  const adminOrder = await r.json();
+  log('admin get order', r.status, `screenshots=${adminOrder.order && adminOrder.order.screenshots.length}`);
+
+  // admin update payment status
+  r = await fetch(base + '/api/admin/orders/' + order.order.id, {
+    method: 'PUT', headers: { 'Content-Type': 'application/json', cookie },
+    body: JSON.stringify({ payment_status: 'paid', order_status: 'processing' }),
+  });
+  const updated = await r.json();
+  log('admin update order', r.status, `pay=${updated.order.payment_status} order=${updated.order.order_status}`);
+
+  // reject dangerous file upload (disguised .php)
+  const badFd = new FormData();
+  badFd.append('image', new Blob([Buffer.from('<?php echo "x"; ?>')], { type: 'image/png' }), 'evil.php');
+  r = await fetch(base + '/api/admin/upload', { method: 'POST', headers: { cookie }, body: badFd });
+  log('reject dangerous upload', r.status);
+
+  console.log(out.join('\n'));
+  server.close();
+  setTimeout(() => process.exit(0), 300);
+}
+
+main().catch((e) => { console.error('FAIL', e); process.exit(1); });

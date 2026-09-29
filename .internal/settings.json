@@ -1,0 +1,73 @@
+{
+  "appLanguage": null,
+  "bionicLocalModelLogsLineLimit": 500,
+  "dismissedContentIdentifiers": [],
+  "appearance": {
+    "inlineDiffMode": "unified",
+    "sidebarBackgroundMode": "solid"
+  },
+  "browser": {
+    "storageMode": "memory",
+    "allowedOrigins": []
+  },
+  "cloudInference": {
+    "billingContext": {
+      "type": "personal"
+    },
+    "pinnedModelIdentifiers": []
+  },
+  "developer": {
+    "orchestratorPresentationMode": "floating",
+    "runtimeLogVerbosityLevel": 3,
+    "windowsPreferPowerShell": false
+  },
+  "downloads": {
+    "showNonModelDownloads": false
+  },
+  "miniWindow": {
+    "showInEveryWorkspace": false
+  },
+  "notifications": {
+    "sessionCompletedEnabled": false
+  },
+  "onboarding": {
+    "classicLmStudioFootprint": null
+  },
+  "localModels": {
+    "autoFitMinContextLength": 16384,
+    "modelLoadingGuardrails": {
+      "mode": "relaxed",
+      "customThresholdBytes": 4294967296,
+      "alwaysAllowLoadAnyway": false
+    }
+  },
+  "skills": {
+    "globalSkillOverrides": [],
+    "enabledOtherHarnessDirectories": []
+  },
+  "sessions": {
+    "firstShellWarning": false,
+    "arrowUpEditsLatestMessage": false,
+    "historyRecallEnabled": false,
+    "latestMessageUsesEditAction": false,
+    "lastSelectedModelSpecifier": {
+      "type": "cloudInference",
+      "model": "deepseek-ai/DeepSeek-V4-Pro"
+    },
+    "rootModelSpecifier": null,
+    "queueSendsWhileRunning": true,
+    "renameAfterFork": true,
+    "reviewerPreference": "",
+    "reviewerPreferenceEnabled": false,
+    "browserControlEnabled": false,
+    "webSearchEnabled": true,
+    "explorationSubagentEnabled": true,
+    "visionSubagentModelSpecifier": null
+  },
+  "voice": {
+    "autoLoadModel": false
+  },
+  "updates": {
+    "automaticDownloadsEnabled": true
+  }
+}

@@ -1,0 +1,26 @@
+{
+  "ownerKey": "user:cmulslpl50000zl1p54ornzcc:key:ce93b19089bc86424ced0db4b6a1cb47",
+  "billingContext": {
+    "type": "personal"
+  },
+  "payload": {
+    "generatedAtIso": "2026-09-28T22:02:31.645Z",
+    "period": "last30Days",
+    "requestCount": 0,
+    "planUsage": {
+      "requestCount": 0
+    },
+    "creditUsage": {
+      "requestCount": 0,
+      "inputTokens": "0",
+      "cachedInputTokens": "0",
+      "outputTokens": "0",
+      "spendMicrodollars": "0"
+    },
+    "inputTokens": "0",
+    "cachedInputTokens": "0",
+    "outputTokens": "0",
+    "spendMicrodollars": "0",
+    "unvaluedRequestCount": 0
+  }
+}

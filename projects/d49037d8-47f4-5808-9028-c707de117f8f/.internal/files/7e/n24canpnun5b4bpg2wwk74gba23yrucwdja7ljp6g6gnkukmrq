@@ -1,0 +1,446 @@
+'use strict';
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { DatabaseSync } = require('node:sqlite');
+const config = require('./config');
+
+// Ensure data dir exists
+fs.mkdirSync(path.dirname(config.dbFile), { recursive: true });
+
+const db = new DatabaseSync(config.dbFile);
+
+// Enable foreign keys
+db.exec('PRAGMA foreign_keys = ON;');
+db.exec('PRAGMA journal_mode = WAL;');
+
+function migrate() {
+  db.exec(`
+    CREATE TABLE IF NOT EXISTS users (
+      id            INTEGER PRIMARY KEY AUTOINCREMENT,
+      username      TEXT NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL,
+      role          TEXT NOT NULL DEFAULT 'admin',
+      created_at    TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS categories (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT NOT NULL,
+      slug       TEXT NOT NULL UNIQUE,
+      parent_id  INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+      image      TEXT,
+      sort_order INTEGER NOT NULL DEFAULT 0,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS manufacturers (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      name       TEXT NOT NULL,
+      slug       TEXT NOT NULL UNIQUE,
+      logo       TEXT,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS motorcycle_models (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      manufacturer_id INTEGER NOT NULL REFERENCES manufacturers(id) ON DELETE CASCADE,
+      name            TEXT NOT NULL,
+      year            TEXT,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS products (
+      id              INTEGER PRIMARY KEY AUTOINCREMENT,
+      sku             TEXT UNIQUE,
+      name            TEXT NOT NULL,
+      slug            TEXT NOT NULL UNIQUE,
+      description     TEXT,
+      price           REAL NOT NULL,
+      old_price       REAL,
+      discount        INTEGER NOT NULL DEFAULT 0,
+      stock           INTEGER NOT NULL DEFAULT 0,
+      category_id     INTEGER REFERENCES categories(id) ON DELETE SET NULL,
+      manufacturer_id INTEGER REFERENCES manufacturers(id) ON DELETE SET NULL,
+      model_id        INTEGER REFERENCES motorcycle_models(id) ON DELETE SET NULL,
+      year            TEXT,
+      compatibility   TEXT,
+      status          TEXT NOT NULL DEFAULT 'active',
+      images          TEXT NOT NULL DEFAULT '[]',
+      sold_count      INTEGER NOT NULL DEFAULT 0,
+      created_at      TEXT NOT NULL DEFAULT (datetime('now')),
+      updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS orders (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_number   TEXT NOT NULL UNIQUE,
+      customer_name  TEXT NOT NULL,
+      phone          TEXT NOT NULL,
+      whatsapp       TEXT,
+      governorate    TEXT NOT NULL,
+      city           TEXT NOT NULL,
+      address        TEXT NOT NULL,
+      notes          TEXT,
+      subtotal       REAL NOT NULL,
+      discount       REAL NOT NULL DEFAULT 0,
+      shipping       REAL NOT NULL DEFAULT 0,
+      total          REAL NOT NULL,
+      payment_method TEXT NOT NULL,
+      payment_status TEXT NOT NULL DEFAULT 'pending',
+      order_status   TEXT NOT NULL DEFAULT 'new',
+      transaction_id TEXT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS order_items (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id   INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      product_id INTEGER REFERENCES products(id) ON DELETE SET NULL,
+      name       TEXT NOT NULL,
+      sku        TEXT,
+      price      REAL NOT NULL,
+      quantity   INTEGER NOT NULL,
+      image      TEXT
+    );
+
+    CREATE TABLE IF NOT EXISTS payments (
+      id             INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id       INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      method         TEXT NOT NULL,
+      amount         REAL NOT NULL,
+      status         TEXT NOT NULL DEFAULT 'pending',
+      transaction_id TEXT,
+      created_at     TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE TABLE IF NOT EXISTS payment_screenshots (
+      id         INTEGER PRIMARY KEY AUTOINCREMENT,
+      order_id   INTEGER NOT NULL REFERENCES orders(id) ON DELETE CASCADE,
+      payment_id INTEGER REFERENCES payments(id) ON DELETE CASCADE,
+      filename   TEXT NOT NULL,
+      path       TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT (datetime('now'))
+    );
+
+    CREATE INDEX IF NOT EXISTS idx_products_category ON products(category_id);
+    CREATE INDEX IF NOT EXISTS idx_products_manufacturer ON products(manufacturer_id);
+    CREATE INDEX IF NOT EXISTS idx_products_model ON products(model_id);
+    CREATE INDEX IF NOT EXISTS idx_orders_status ON orders(order_status);
+    CREATE INDEX IF NOT EXISTS idx_order_items_order ON order_items(order_id);
+    CREATE INDEX IF NOT EXISTS idx_models_manufacturer ON motorcycle_models(manufacturer_id);
+  `);
+}
+
+function seed() {
+  const userCount = db.prepare('SELECT COUNT(*) AS c FROM users').get().c;
+  if (userCount === 0) {
+    const { hashPassword } = require('./auth');
+    db.prepare(
+      'INSERT INTO users (username, password_hash, role) VALUES (?, ?, ?)'
+    ).run(config.adminUsername, hashPassword(config.adminPassword), 'admin');
+  }
+
+  const catCount = db.prepare('SELECT COUNT(*) AS c FROM categories').get().c;
+  if (catCount === 0) {
+    const cats = [
+      'موتوسيكلات',
+      'محركات',
+      'قطع غيار المحرك',
+      'قطع غيار الكهرباء',
+      'الفرامل',
+      'العفشة',
+      'الإطارات',
+      'السلاسل والتروس',
+      'الزيوت',
+      'البطاريات',
+      'الإضاءة',
+      'المرايات',
+      'الإكسسوارات',
+      'الخوذ',
+      'الملابس',
+      'أدوات الصيانة',
+    ];
+    const ins = db.prepare(
+      'INSERT INTO categories (name, slug, sort_order) VALUES (?, ?, ?)'
+    );
+    cats.forEach((name, i) => {
+      ins.run(name, slugify(name), i);
+    });
+  }
+
+  const manCount = db.prepare('SELECT COUNT(*) AS c FROM manufacturers').get().c;
+  if (manCount === 0) {
+    const mans = ['Honda', 'Yamaha', 'SYM', 'Bajaj', 'Suzuki', 'Kawasaki', 'TVS'];
+    const ins = db.prepare('INSERT INTO manufacturers (name, slug) VALUES (?, ?)');
+    mans.forEach((name) => ins.run(name, slugify(name)));
+  }
+
+  const modelCount = db.prepare('SELECT COUNT(*) AS c FROM motorcycle_models').get().c;
+  if (modelCount === 0) {
+    const models = {
+      Honda: ['CBR', 'CB', 'Dio', 'Activa'],
+      Yamaha: ['R1', 'R6', 'MT-07', 'NMAX'],
+      SYM: ['Symphony', 'Jet', 'Attila'],
+      Bajaj: ['Boxer', 'Pulsar', 'Discover'],
+      Suzuki: ['GSX', 'Hayabusa', 'Address'],
+      Kawasaki: ['Ninja', 'Z1000'],
+      TVS: ['Apache', 'Jupiter'],
+    };
+    const getMan = db.prepare('SELECT id FROM manufacturers WHERE name = ?');
+    const ins = db.prepare(
+      'INSERT INTO motorcycle_models (manufacturer_id, name, year) VALUES (?, ?, ?)'
+    );
+    for (const [man, list] of Object.entries(models)) {
+      const manRow = getMan.get(man);
+      if (!manRow) continue;
+      for (const m of list) ins.run(manRow.id, m, null);
+    }
+  }
+
+  const prodCount = db.prepare('SELECT COUNT(*) AS c FROM products').get().c;
+  if (prodCount === 0) {
+    seedProducts();
+  }
+}
+
+function seedProducts() {
+  const getCat = db.prepare('SELECT id FROM categories WHERE name = ?');
+  const getMan = db.prepare('SELECT id FROM manufacturers WHERE name = ?');
+  const getModel = db.prepare(
+    'SELECT id FROM motorcycle_models WHERE manufacturer_id = ? AND name = ?'
+  );
+  const ins = db.prepare(`
+    INSERT INTO products
+      (sku, name, slug, description, price, old_price, discount, stock,
+       category_id, manufacturer_id, model_id, year, compatibility, status, images, sold_count)
+    VALUES
+      (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+  `);
+
+  const products = [
+    {
+      sku: 'MTR-HON-CBR-01',
+      name: 'موتوسيكل Honda CBR 250',
+      cat: 'موتوسيكلات',
+      man: 'Honda',
+      model: 'CBR',
+      price: 185000,
+      old_price: 200000,
+      stock: 5,
+      sold: 12,
+      desc: 'موتوسيكل هوندا CBR 250 رياضي، محرك قوي وأداء ممتاز على الطرق السريعة.',
+    },
+    {
+      sku: 'MTR-YAM-R1-01',
+      name: 'موتوسيكل Yamaha R1',
+      cat: 'موتوسيكلات',
+      man: 'Yamaha',
+      model: 'R1',
+      price: 450000,
+      old_price: 480000,
+      stock: 2,
+      sold: 4,
+      desc: 'موتوسيكل ياماها R1 سوبر سبورت، قمة الأداء والتقنية.',
+    },
+    {
+      sku: 'MTR-SYM-SYM-01',
+      name: 'موتوسيكل SYM Symphony',
+      cat: 'موتوسيكلات',
+      man: 'SYM',
+      model: 'Symphony',
+      price: 52000,
+      old_price: 56000,
+      stock: 8,
+      sold: 20,
+      desc: 'سكوتر SYM Symphony اقتصادي وعملي للاستخدام اليومي.',
+    },
+    {
+      sku: 'MTR-BAJ-BOX-01',
+      name: 'موتوسيكل Bajaj Boxer',
+      cat: 'موتوسيكلات',
+      man: 'Bajaj',
+      model: 'Boxer',
+      price: 48000,
+      old_price: 51000,
+      stock: 10,
+      sold: 35,
+      desc: 'موتوسيكل باجاج بوكسر متين واقتصادي، الأكثر مبيعًا.',
+    },
+    {
+      sku: 'ENG-PST-01',
+      name: 'بستم كامل Honda CBR',
+      cat: 'قطع غيار المحرك',
+      man: 'Honda',
+      model: 'CBR',
+      price: 1200,
+      old_price: 1400,
+      stock: 50,
+      sold: 80,
+      desc: 'بستم كامل أصلي لمحرك هوندا CBR، جودة عالية.',
+    },
+    {
+      sku: 'ENG-CHN-01',
+      name: 'سلسلة توقيت Yamaha R1',
+      cat: 'السلاسل والتروس',
+      man: 'Yamaha',
+      model: 'R1',
+      price: 850,
+      stock: 30,
+      sold: 15,
+      desc: 'سلسلة توقيت أصلية لمحرك ياماها R1.',
+    },
+    {
+      sku: 'ELC-BAT-01',
+      name: 'بطارية 12V 9Ah',
+      cat: 'البطاريات',
+      man: 'SYM',
+      model: 'Symphony',
+      price: 950,
+      old_price: 1100,
+      stock: 40,
+      sold: 60,
+      desc: 'بطارية 12 فولت 9 أمبير، مناسبة للسكوتر والموتوسيكلات الصغيرة.',
+    },
+    {
+      sku: 'BRK-DSC-01',
+      name: 'طقم فرامل أمامية Bajaj Boxer',
+      cat: 'الفرامل',
+      man: 'Bajaj',
+      model: 'Boxer',
+      price: 650,
+      stock: 25,
+      sold: 45,
+      desc: 'طقم فرامل أمامية أصلي لباجاج بوكسر.',
+    },
+    {
+      sku: 'TIR-17-01',
+      name: 'إطار أمامي 17 بوصة',
+      cat: 'الإطارات',
+      man: 'Honda',
+      model: 'CBR',
+      price: 1400,
+      old_price: 1600,
+      stock: 18,
+      sold: 22,
+      desc: 'إطار أمامي مقاس 17 بوصة، ثبات وتحكم ممتاز.',
+    },
+    {
+      sku: 'OIL-10W40',
+      name: 'زيت محرك 10W40 (1 لتر)',
+      cat: 'الزيوت',
+      price: 320,
+      stock: 200,
+      sold: 300,
+      desc: 'زيت محرك عالي الجودة 10W40 لتر واحد.',
+    },
+    {
+      sku: 'LGT-LED-01',
+      name: 'كشاف LED أمامي',
+      cat: 'الإضاءة',
+      man: 'Yamaha',
+      model: 'R1',
+      price: 750,
+      old_price: 900,
+      stock: 35,
+      sold: 28,
+      desc: 'كشاف LED أمامي قوي الإضاءة ومنخفض الاستهلاك.',
+    },
+    {
+      sku: 'ACC-HLM-01',
+      name: 'خوذة حماية كاملة',
+      cat: 'الخوذ',
+      price: 1800,
+      old_price: 2200,
+      stock: 15,
+      sold: 40,
+      desc: 'خوذة حماية كاملة معتمدة، أمان وراحة.',
+    },
+    {
+      sku: 'ACC-MIR-01',
+      name: 'مرايا جانبية (زوج)',
+      cat: 'المرايات',
+      man: 'SYM',
+      model: 'Symphony',
+      price: 280,
+      stock: 60,
+      sold: 90,
+      desc: 'زوج مرايا جانبية عالية الوضوح.',
+    },
+    {
+      sku: 'ACC-SUS-01',
+      name: 'مساعدين خلفيين Yamaha R1',
+      cat: 'العفشة',
+      man: 'Yamaha',
+      model: 'R1',
+      price: 3200,
+      old_price: 3800,
+      stock: 6,
+      sold: 3,
+      desc: 'مساعدين خلفيين رياضيين لتحكم أفضل.',
+    },
+    {
+      sku: 'ACC-JKT-01',
+      name: 'جاكت حماية ركوب',
+      cat: 'الملابس',
+      price: 2400,
+      old_price: 2800,
+      stock: 12,
+      sold: 18,
+      desc: 'جاكت حماية مقاوم للرياح مع حشوات واقية.',
+    },
+    {
+      sku: 'TLS-KIT-01',
+      name: 'عدة صيانة شاملة',
+      cat: 'أدوات الصيانة',
+      price: 1500,
+      stock: 20,
+      sold: 25,
+      desc: 'عدة صيانة شاملة تحتوي على الأدوات الأساسية.',
+    },
+  ];
+
+  for (const p of products) {
+    const cat = getCat.get(p.cat);
+    const man = p.man ? getMan.get(p.man) : null;
+    const model = p.man && p.model ? getModel.get(man.id, p.model) : null;
+    const discount = p.old_price
+      ? Math.round(((p.old_price - p.price) / p.old_price) * 100)
+      : 0;
+    const images = JSON.stringify([]);
+    ins.run(
+      p.sku,
+      p.name,
+      slugify(p.name),
+      p.desc,
+      p.price,
+      p.old_price || null,
+      discount,
+      p.stock,
+      cat ? cat.id : null,
+      man ? man.id : null,
+      model ? model.id : null,
+      null,
+      p.man && p.model ? `${p.man} ${p.model}` : null,
+      'active',
+      images,
+      p.sold
+    );
+  }
+}
+
+function slugify(text) {
+  return String(text)
+    .toString()
+    .trim()
+    .toLowerCase()
+    .replace(/[^\w\u0600-\u06FF\s-]/g, '')
+    .replace(/\s+/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+migrate();
+seed();
+
+module.exports = { db, slugify };

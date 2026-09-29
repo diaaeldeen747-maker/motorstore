@@ -1,0 +1,196 @@
+{
+  "ownerKey": "user:cmulslpl50000zl1p54ornzcc:key:ce93b19089bc86424ced0db4b6a1cb47",
+  "billingContext": {
+    "type": "personal"
+  },
+  "payload": {
+    "generatedAtIso": "2026-09-28T22:56:01.128Z",
+    "links": {
+      "viewPlansUrl": "https://lmstudio.ai/dashboard/cloud?open=pricing",
+      "getMoreCreditsUrl": "https://lmstudio.ai/dashboard/cloud"
+    },
+    "plan": null,
+    "showCredits": false,
+    "balanceMicrodollars": null,
+    "limits": [],
+    "models": [
+      {
+        "label": "GLM-5.3-Flash",
+        "modelIdentifier": "zai-org/GLM-5.3-Flash",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "mapTo",
+            "mapTo": "low"
+          },
+          "low": {
+            "type": "native"
+          },
+          "medium": {
+            "type": "mapTo",
+            "mapTo": "high"
+          },
+          "high": {
+            "type": "native"
+          },
+          "xhigh": {
+            "type": "native",
+            "label": "Max"
+          }
+        },
+        "maxContextLength": 1000000,
+        "vision": true
+      },
+      {
+        "label": "Kimi K3",
+        "modelIdentifier": "moonshotai/Kimi-K3",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "mapTo",
+            "mapTo": "low"
+          },
+          "low": {
+            "type": "native"
+          },
+          "medium": {
+            "type": "mapTo",
+            "mapTo": "high"
+          },
+          "high": {
+            "type": "native"
+          },
+          "xhigh": {
+            "type": "native",
+            "label": "Max"
+          }
+        },
+        "maxContextLength": 250000,
+        "vision": true
+      },
+      {
+        "label": "DeepSeek V4.1 Flash",
+        "modelIdentifier": "deepseek-ai/DeepSeek-V4.1-Flash",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "native"
+          },
+          "low": {
+            "type": "native",
+            "label": "Low"
+          },
+          "medium": {
+            "type": "native",
+            "label": "Medium"
+          },
+          "high": {
+            "type": "native",
+            "label": "High"
+          },
+          "xhigh": {
+            "type": "native",
+            "label": "Max"
+          }
+        },
+        "maxContextLength": 1000000,
+        "vision": true
+      },
+      {
+        "label": "DeepSeek V4 Flash",
+        "modelIdentifier": "deepseek-ai/DeepSeek-V4-Flash-0731",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "native"
+          },
+          "low": {
+            "type": "native"
+          },
+          "medium": {
+            "type": "native"
+          },
+          "high": {
+            "type": "native"
+          },
+          "xhigh": {
+            "type": "native"
+          }
+        },
+        "maxContextLength": 500000,
+        "vision": false
+      },
+      {
+        "label": "DeepSeek V4 Pro",
+        "modelIdentifier": "deepseek-ai/DeepSeek-V4-Pro",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "native"
+          },
+          "low": {
+            "type": "native"
+          },
+          "medium": {
+            "type": "native"
+          },
+          "high": {
+            "type": "native"
+          },
+          "xhigh": {
+            "type": "native"
+          }
+        },
+        "maxContextLength": 262144,
+        "vision": false
+      },
+      {
+        "label": "GLM-5.2",
+        "modelIdentifier": "zai-org/GLM-5.2",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "native"
+          },
+          "low": {
+            "type": "mapTo",
+            "mapTo": "high"
+          },
+          "medium": {
+            "type": "mapTo",
+            "mapTo": "high"
+          },
+          "high": {
+            "type": "native"
+          },
+          "xhigh": {
+            "type": "native",
+            "label": "Max"
+          }
+        },
+        "maxContextLength": 256000,
+        "vision": false
+      },
+      {
+        "label": "GLM-5.3",
+        "modelIdentifier": "zai-org/GLM-5.3",
+        "reasoningLevelMapping": {
+          "off": {
+            "type": "mapTo",
+            "mapTo": "low"
+          },
+          "low": {
+            "type": "native"
+          },
+          "medium": {
+            "type": "mapTo",
+            "mapTo": "high"
+          },
+          "high": {
+            "type": "native"
+          },
+          "xhigh": {
+            "type": "native",
+            "label": "Max"
+          }
+        },
+        "maxContextLength": 500000,
+        "vision": false
+      }
+    ]
+  }
+}

@@ -1,0 +1,28 @@
+const server = require(process.argv[2]);
+const base = 'http://127.0.0.1:3000';
+
+async function main() {
+  const checks = [
+    ['/', 'text/html'],
+    ['/css/style.css', 'text/css'],
+    ['/js/main.js', 'text/javascript'],
+    ['/js/admin.js', 'text/javascript'],
+    ['/js/api.js', 'text/javascript'],
+    ['/js/cart.js', 'text/javascript'],
+    ['/js/ui.js', 'text/javascript'],
+    ['/assets/logo.svg', 'image/svg+xml'],
+    ['/api/health', 'application/json'],
+  ];
+  for (const [path, expectType] of checks) {
+    const r = await fetch(base + path);
+    const ct = (r.headers.get('content-type') || '').split(';')[0];
+    const ok = r.status === 200 && ct.startsWith(expectType);
+    console.log(`${ok ? 'OK ' : 'FAIL'} ${r.status} ${ct}  ${path}`);
+  }
+  // path traversal attempt
+  const r = await fetch(base + '/../server/config.js');
+  console.log(`traversal -> ${r.status} (should be 403/404)`);
+  server.close();
+  setTimeout(() => process.exit(0), 300);
+}
+main().catch((e) => { console.error(e); process.exit(1); });
